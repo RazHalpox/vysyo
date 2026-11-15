@@ -1,0 +1,231 @@
+// Modèle local (IndexedDB). Lignes volontairement plates et maigres : un catalogue de 180 000 films
+// doit tenir sur disque, pas en mémoire. Les URL de flux ne sont JAMAIS stockées : elles sont
+// reconstruites à la lecture depuis la source (identifiants chiffrés) et l'identifiant du flux.
+
+/** "stalker" : portail Stalker / Ministra (MAC dans `username`, identifiants facultatifs empaquetés dans `password`, voir net/stalker.ts). */
+export type SourceType = "xtream" | "m3u" | "stalker";
+export type Kind = "live" | "movie" | "series";
+
+export interface Source {
+  id?: number;
+  name: string;
+  type: SourceType;
+  /** Xtream : URL du serveur. */
+  server: string;
+  username: string;
+  password: string;
+  /** M3U : lien de la playlist (contient souvent des identifiants). */
+  m3uUrl: string;
+  /** Portail Stalker : point d'entrée de l'API qui a répondu (…/portal.php ou …/server/load.php), sondé à l'ajout. */
+  stalkerApi?: string;
+  /** « Guide de cette source » : adresse d'un guide XMLTV (http/https, .xml ou .xml.gz). Vide = guide du fournisseur seulement. */
+  epgUrl: string;
+  /** Rôle de [epgUrl] : « replace » (défaut) remplace le guide du fournisseur, « complete » ne comble que les chaînes sans programme. */
+  epgMode?: "replace" | "complete";
+  userAgent: string;
+  referer: string;
+  /**
+   * Génération de catalogue courante. Les lignes de catalogue (catégories, chaînes, films, séries, guide)
+   * portent ce numéro dans leur champ `sourceId` : une nouvelle synchro écrit une nouvelle génération,
+   * puis bascule `cid` d'un coup — l'interface ne voit jamais un catalogue à moitié vidé. 0 = aucun.
+   */
+  cid: number;
+  /** Langues (codes pays) à synchroniser ; null = toutes. */
+  langs: string[] | null;
+  createdAt: number;
+  lastSyncAt: number;
+  counts: { live: number; movie: number; series: number };
+  expDate: number | null;
+  maxConnections: number;
+  /** Compte cloud : identifiant stable du fournisseur côté Worker (clé de fusion). */
+  cloudId?: string;
+  /** "cloud" : créée par le compte (identifiants fournis par le Worker, retirée avec lui) ; "local" : créée ici puis partagée. */
+  cloudOrigin?: "cloud" | "local";
+  /** Partage connu : "all" ou nombre d'appareils. */
+  cloudShared?: "all" | number;
+  /** Nom de l'appareil d'origine (tableau de bord ou autre appareil). */
+  cloudOriginName?: string;
+  /** "ready" une fois la première synchro terminée. */
+  state: "new" | "syncing" | "ready" | "error";
+  error?: string;
+}
+
+export interface CategoryRow {
+  id?: number;
+  /** Génération de catalogue (voir Source.cid). */
+  sourceId: number;
+  kind: Kind;
+  extId: string;
+  name: string;
+  label: string;
+  badge: string | null;
+  count: number;
+  enabled: 0 | 1;
+  adult: 0 | 1;
+  ord: number;
+}
+
+export interface ChannelRow {
+  id?: number;
+  sourceId: number;
+  catExt: string;
+  ord: number;
+  streamId: number;
+  num: number;
+  name: string;
+  display: string;
+  norm: string;
+  /** Index de recherche par mot (voir wordKeys) ; absent sur les lignes d'avant la version 2 du schéma. */
+  words?: string[];
+  country: string | null;
+  q: number;
+  flags: number;
+  sep: 0 | 1;
+  logo: string | null;
+  epg: string | null;
+  archive: 0 | 1;
+  /** M3U : URL de flux fournie par la playlist (jamais journalisée) ; portail Stalker : adresse interne `stalker:…`. */
+  url?: string;
+  /** M3U : flux protégé (DRM) déclaré par la playlist ; jamais lu sur ordinateur. Aucune clé ni URL de licence n'est conservée. */
+  drm?: 1;
+}
+
+export interface MovieRow {
+  id?: number;
+  sourceId: number;
+  catExt: string;
+  ord: number;
+  streamId: number;
+  name: string;
+  title: string;
+  norm: string;
+  words?: string[];
+  year: number | null;
+  poster: string | null;
+  rating: number;
+  ext: string;
+  added: number;
+  /** Portail Stalker : adresse interne `stalker:vod:…` (lien demandé au portail à la lecture). */
+  url?: string;
+}
+
+export interface SeriesRow {
+  id?: number;
+  sourceId: number;
+  catExt: string;
+  ord: number;
+  seriesId: number;
+  name: string;
+  title: string;
+  norm: string;
+  words?: string[];
+  year: number | null;
+  poster: string | null;
+  backdrop: string | null;
+  plot: string | null;
+  rating: number;
+  added: number;
+  /** Portail Stalker : commande de la série (`stalker:vod::…`) et numéros d'épisodes (tableau `series`). */
+  url?: string;
+  eps?: number[];
+  /** Module `type=series` : identifiant du portail (souvent non numérique), `seriesId` n'en est alors qu'un condensé local. */
+  portalId?: string;
+}
+
+export interface ProgramRow {
+  id?: number;
+  sourceId: number;
+  epg: string;
+  start: number;
+  end: number;
+  title: string;
+  desc: string;
+}
+
+export interface FavoriteRow {
+  key: string;
+  profile: string;
+  /** Identifiant réel de la source (et non la génération de catalogue). */
+  sourceId: number;
+  kind: Kind;
+  refId: number;
+  name: string;
+  image: string | null;
+  addedAt: number;
+}
+
+/** Ordre personnel des chaînes d'une liste (catégorie du fournisseur ou favoris) pour un profil ; local à cet appareil. */
+/** Catégories masquées par un profil, pour une source et un type (identifiants de catégorie du fournisseur). */
+export interface ProfileHiddenRow {
+  key: string;
+  profile: string;
+  /** Identifiant réel de la source (et non la génération de catalogue). */
+  sourceId: number;
+  kind: Kind;
+  ids: string[];
+}
+
+export interface ChannelOrderRow {
+  key: string;
+  profile: string;
+  /** Identifiant réel de la source (et non la génération de catalogue : une resynchronisation ne perd pas l'ordre). */
+  sourceId: number;
+  /** Identifiant de catégorie du fournisseur, ou « __fav__ » (favoris). */
+  scope: string;
+  /** Identifiants de flux, dans l'ordre choisi. */
+  ids: number[];
+  updatedAt: number;
+}
+
+/** Chaîne masquée par l'utilisateur pour une source (n'apparaît plus nulle part ; partagée entre appareils). */
+export interface HiddenChannelRow {
+  key: string;
+  /** Identifiant réel de la source (et non la génération de catalogue). */
+  sourceId: number;
+  /** Identifiant de flux de la chaîne chez le fournisseur. */
+  streamId: number;
+  /** Identifiant de sa catégorie chez le fournisseur (null = inconnue). */
+  catExt: string | null;
+  name: string;
+}
+
+export interface HistoryRow {
+  key: string;
+  profile: string;
+  sourceId: number;
+  kind: Kind;
+  refId: number;
+  title: string;
+  image: string | null;
+  pos: number;
+  dur: number;
+  updatedAt: number;
+  /** Épisode : identifiant, extension de conteneur, saison/épisode et série parente. */
+  ext?: string;
+  /** Identifiant de l'épisode (séries) pour la reprise exacte. */
+  epId?: number;
+  seriesId?: number;
+  season?: number;
+  episode?: number;
+}
+
+export interface DetailRow {
+  key: string;
+  json: unknown;
+  fetchedAt: number;
+}
+
+export interface SettingRow { key: string; value: unknown }
+
+export interface SyncProgress {
+  phase: "categories" | "live" | "movie" | "series" | "epg" | "done";
+  /** 0..1 pour la phase courante. */
+  ratio: number;
+  counts: { live: number; movie: number; series: number };
+  /** Portail Stalker : catégories sautées pendant la synchro (la synchro a réussi ; leur contenu précédent est gardé). */
+  skipped?: number;
+  message?: string;
+  /** Phase « epg » : octets du guide reçus et programmes écrits jusqu'ici. */
+  bytes?: number;
+  programs?: number;
+}

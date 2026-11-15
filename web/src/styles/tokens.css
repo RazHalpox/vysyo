@@ -1,0 +1,86 @@
+/* Polices AUTO-HÉBERGÉES (fichiers embarqués par Vite, aucune requête vers un CDN). */
+@import "@fontsource/sora/600.css";
+@import "@fontsource/sora/700.css";
+@import "@fontsource/sora/800.css";
+@import "@fontsource/manrope/500.css";
+@import "@fontsource/manrope/600.css";
+@import "@fontsource/manrope/700.css";
+@import "@fontsource/manrope/800.css";
+
+/* Jetons du design Ultra TV v2 (maquettes TV adaptées au bureau). Sombre par défaut ; « Automatique » suit le système. */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0a0c10;
+  --rail: #0e1117;
+  --surface: #161a22;
+  --surface-2: #1c2029;
+  --surface-3: #2a3140;
+  --tone: #12151c;
+  --line: #1c2029;
+  --text: #f4f5f7;
+  --text-2: #c9cdd6;
+  --text-3: #a9afbc;
+  --text-4: #7b8291;
+  --text-5: #5a6172;
+  --sel-bg: #f4f5f7;
+  --sel-ink: #0a0c10;
+  --sel-sub: #3a4252;
+  --sel-logo: #dce1ea;
+  --accent: #ff3b47;
+  --accent-text: #ff8088;
+  --now-tint: #2a1418;
+  --on-accent: #ffffff;
+  --scrim: rgba(10, 12, 16, 0.86);
+  --shadow: 0 20px 48px rgba(0, 0, 0, 0.6);
+  --track: #3a4252;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f6f8;
+  --rail: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #e8ebf0;
+  --surface-3: #dce1ea;
+  --tone: #e8ebf0;
+  --line: #e3e6ec;
+  --text: #12141a;
+  --text-2: #3a4252;
+  --text-3: #5b6375;
+  --text-4: #6b7385;
+  --text-5: #9099ab;
+  --sel-bg: #12141a;
+  --sel-ink: #f5f6f8;
+  --sel-sub: #c9cdd6;
+  --sel-logo: #3a4252;
+  --accent: #e0202c;
+  --accent-text: #c4161f;
+  --now-tint: #fbe3e5;
+  --scrim: rgba(245, 246, 248, 0.9);
+  --shadow: 0 20px 48px rgba(18, 20, 26, 0.16);
+  --track: #c4cad6;
+}
+
+/* Noir (OLED) : fond #000000 et surfaces très sombres ; texte, accent et focus comme en sombre. */
+:root[data-theme="oled"] {
+  color-scheme: dark;
+  --bg: #000000;
+  --rail: #050506;
+  --surface: #0d0f13;
+  --surface-2: #14171d;
+  --surface-3: #20242d;
+  --tone: #08090b;
+  --line: #14171d;
+  --scrim: rgba(0, 0, 0, 0.9);
+  --track: #2a3140;
+}
+
+:root {
+  --font-title: "Sora", system-ui, sans-serif;
+  --font-text: "Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --radius: 1.375rem;
+  --rail-w: 88px;
+  /* 1 rem = 16 px vers 1280 px de large ; la fenêtre de 1024 à 2560 px se met à l'échelle. */
+  font-size: clamp(14px, calc(0.45vw + 10.2px), 19px);
+}

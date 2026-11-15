@@ -1,0 +1,689 @@
+// Synchronisation du catalogue : exécutée dans un Web Worker (sync/worker.ts) pour ne jamais
+// bloquer l'interface, même avec 55 000 chaînes, 180 000 films et 48 000 séries.
+// Lecture en flux (net/json.ts) + écriture par lots dans IndexedDB.
+
+import { clearCatalog, db, nextCid, purgeOrphanGenerations, setGenerationPending } from "@/db/db";
+import { removeHiddenFromCatalog } from "@/db/hidden";
+import { mergeCategoryOrder } from "@/lib/categoryOrder";
+import type { CategoryRow, ChannelRow, Kind, MovieRow, SeriesRow, Source, SyncProgress } from "@/db/types";
+import { parseChannelName } from "@/lib/channelName";
+import { OTHER_LANG, categoryLang } from "@/lib/categoryLang";
+import { cleanTitle, prettyCategoryName } from "@/lib/titleCleaner";
+import { firstString, normText, rating10, toNum, wordKeys } from "@/lib/text";
+import { parseM3u } from "@/lib/m3u";
+import { streamObjects, TruncatedError } from "@/net/json";
+import { transportFetch, type Transport } from "@/net/transport";
+import type { Table } from "dexie";
+import { StalkerClient, absoluteUrl, normalizeMac, stalkerLink, unpackCreds, type StalkerCategory, type StalkerItem } from "@/net/stalker";
+import { StalkerSyncLog, type SyncType } from "@/net/stalkerLog";
+import {
+  handshake, xtreamArray, xtreamStream,
+  type XtreamCategory, type XtreamCreds, type XtreamLive, type XtreamSeries, type XtreamVod,
+} from "@/net/xtream";
+
+export type ProgressFn = (p: SyncProgress) => void;
+
+export { OTHER_LANG };
+
+export interface DetectedLanguage { code: string; categories: number }
+
+export function credsOf(s: Source): XtreamCreds {
+  return { server: s.server, username: s.username, password: s.password, userAgent: s.userAgent || null, referer: s.referer || null };
+}
+
+/**
+ * Client du portail d'une source Stalker. Le point d'entrée retenu est mémorisé dans la source (`stalkerApi`) :
+ * les synchros suivantes ne sondent plus.
+ */
+export function stalkerOf(t: Transport, s: Source, signal?: AbortSignal, log?: StalkerSyncLog): StalkerClient {
+  const { login, password } = unpackCreds(s.password);
+  return new StalkerClient(t, { portal: s.server, mac: normalizeMac(s.username) ?? s.username, login, password }, {
+    endpoint: s.stalkerApi || null, signal, log,
+    onEndpoint: (api) => { s.stalkerApi = api; if (s.id != null) void db.sources.update(s.id, { stalkerApi: api }).catch(() => undefined); },
+  });
+}
+
+function mapCategories(kind: Kind, sourceId: number, list: XtreamCategory[], langs: string[] | null): CategoryRow[] {
+  return list.map((c, i) => {
+    const name = String(c.category_name ?? "");
+    const code = categoryLang(name);
+    const badge = code === OTHER_LANG ? null : code;
+    return {
+      sourceId, kind, extId: String(c.category_id), name,
+      label: prettyCategoryName(name), badge, count: 0,
+      enabled: langs == null || langs.includes(code) ? 1 : 0,
+      adult: /(^|\W)(xxx|adult|adulte|18\+|\+18|porn|erotic)(\W|$)/i.test(name) ? 1 : 0,
+      ord: i,
+    } satisfies CategoryRow;
+  });
+}
+
+/** Étape rapide (3 petits appels) : catégories et langues détectées, pour l'écran de choix de langues. */
+export async function detectLanguages(t: Transport, s: Source, signal?: AbortSignal): Promise<{ languages: DetectedLanguage[]; counts: Record<Kind, number> }> {
+  if (s.type === "stalker") {
+    const sc = stalkerOf(t, s, signal);
+    const g = await sc.genres();
+    // Films et séries : une liste illisible ne bloque pas l'ajout de la source (la synchro saute alors la partie).
+    const tolerant = async (f: () => Promise<StalkerCategory[]>) => { try { return await f(); } catch (e) { if ((e as Error).name === "AbortError" || signal?.aborted) throw e; return []; } };
+    const v = await tolerant(() => sc.vodCategories());
+    const m = await tolerant(() => sc.seriesCategories());
+    const cats = [...g, ...v, ...m].map((x) => ({ category_id: x.id, category_name: x.title }));
+    return languagesOf(cats, { live: g.length, movie: v.length, series: m.length || v.length });
+  }
+  const c = credsOf(s);
+  const [live, vod, ser] = await Promise.all([
+    xtreamArray<XtreamCategory>(t, c, "get_live_categories", {}, signal),
+    xtreamArray<XtreamCategory>(t, c, "get_vod_categories", {}, signal),
+    xtreamArray<XtreamCategory>(t, c, "get_series_categories", {}, signal),
+  ]);
+  return languagesOf([...live, ...vod, ...ser], { live: live.length, movie: vod.length, series: ser.length });
+}
+
+function languagesOf(cats: XtreamCategory[], counts: Record<Kind, number>): { languages: DetectedLanguage[]; counts: Record<Kind, number> } {
+  const map = new Map<string, number>();
+  for (const cat of cats) {
+    const code = categoryLang(String(cat.category_name ?? ""));
+    map.set(code, (map.get(code) ?? 0) + 1);
+  }
+  const languages = [...map].map(([code, categories]) => ({ code, categories })).sort((a, b) => b.categories - a.categories);
+  return { languages, counts };
+}
+
+export async function testConnection(t: Transport, s: Source, signal?: AbortSignal) {
+  if (s.type === "m3u") {
+    const head = (await readM3u(t, s, signal)).slice(0, 200);
+    if (!head.includes("#EXTM3U") && !head.includes("#EXTINF")) throw new Error("not-m3u");
+    return { ok: true as const, expDate: null, maxConnections: 1 };
+  }
+  if (s.type === "stalker") {
+    if (!normalizeMac(s.username)) throw new Error("auth");
+    const sc = stalkerOf(t, s, signal);
+    const stalkerApi = await sc.probe();
+    const acc = await sc.account().catch(() => null);
+    if (acc?.status === "Expired") throw new Error("expired");
+    if (acc?.status === "Disabled") throw new Error("auth");
+    return { ok: true as const, expDate: acc?.expDate ?? null, maxConnections: 1, stalkerApi };
+  }
+  const h = await handshake(t, credsOf(s), signal);
+  const ui = h.user_info;
+  if (!ui || ui.auth === 0 || (ui.status && ui.status !== "Active")) throw new Error(ui?.status === "Expired" ? "expired" : "auth");
+  const exp = ui.exp_date ? toNum(ui.exp_date, 0) * 1000 : 0;
+  return { ok: true as const, expDate: exp || null, maxConnections: toNum(ui.max_connections, 1) };
+}
+
+/** Texte de la playlist : fichier local (stocké à l'ajout, adresse « file:… ») ou lien distant. */
+async function readM3u(t: Transport, s: Source, signal?: AbortSignal): Promise<string> {
+  if (s.m3uUrl.startsWith("file:")) {
+    const row = await db.details.get(`m3ufile:${s.id ?? "tmp"}`);
+    if (typeof row?.json !== "string") throw new Error("not-m3u");
+    return row.json;
+  }
+  const res = await transportFetch(t, s.m3uUrl, { signal, userAgent: s.userAgent, referer: s.referer });
+  return res.text();
+}
+
+class Throttle {
+  private last = 0;
+  constructor(private fn: ProgressFn, private ms = 120) {}
+  push(p: SyncProgress, force = false) {
+    const now = Date.now();
+    if (force || now - this.last >= this.ms) { this.last = now; this.fn(p); }
+  }
+}
+
+const assertNotAborted = (signal?: AbortSignal) => {
+  if (signal?.aborted) throw new DOMException("Annulé", "AbortError");
+};
+
+export interface SyncOptions {
+  source: Source;
+  transport: Transport;
+  onProgress: ProgressFn;
+  signal?: AbortSignal;
+  /** Conserve les catégories activées/désactivées à la main (au lieu de les recalculer depuis les langues). */
+  preserveFlags?: boolean;
+}
+
+/** Contexte d'une synchro : `cid` est la NOUVELLE génération de catalogue écrite par cette exécution. */
+interface Ctx {
+  source: Source;
+  cid: number;
+  /** Génération précédente (0 = première synchro) : source du contenu gardé quand une catégorie Stalker échoue. */
+  oldCid: number;
+  /** Portail Stalker : catégories sautées (une catégorie VOD sautée en Films puis en Séries ne compte qu'une fois). */
+  skips: { distinct: Set<string>; extra: number };
+  firstGeneration: boolean;
+  counts: { live: number; movie: number; series: number };
+  flags: Map<string, 0 | 1> | null;
+  report: ReportFn;
+  /** Première génération : `sources.cid` a été basculé avant la fin (direct utilisable pendant l'arrivée des films). */
+  switched: boolean;
+}
+
+export async function runSync({ source, transport: t, onProgress, signal, preserveFlags }: SyncOptions): Promise<{ live: number; movie: number; series: number }> {
+  const oldCid = source.cid;
+  // Générations laissées par une synchro interrompue : jamais reprises, elles occuperaient l'espace disque pour toujours.
+  await purgeOrphanGenerations().catch(() => undefined);
+  const cid = await nextCid();
+  await setGenerationPending(cid, true);
+  const counts = { live: 0, movie: 0, series: 0 };
+  const th = new Throttle(onProgress);
+  const skips = { distinct: new Set<string>(), extra: 0 };
+  const report: ReportFn = (phase, ratio, force = false) => {
+    const skipped = skips.distinct.size + skips.extra;
+    th.push({ phase, ratio, counts: { ...counts }, ...(skipped ? { skipped } : {}) }, force);
+  };
+
+  let flags: Map<string, 0 | 1> | null = null;
+  if (preserveFlags && oldCid) {
+    flags = new Map();
+    await db.categories.where("[sourceId+kind]").between([oldCid, ""], [oldCid, "\uffff"]).each((c) => { flags!.set(`${c.kind}:${c.extId}`, c.enabled); flags!.set(`${c.kind}#${c.name}`, c.enabled); });
+  }
+  // Ancien catalogue absent OU vide (première synchro, ou génération perdue puis reconstruite au démarrage) : rien à garder
+  // visible, donc la nouvelle génération est branchée dès la fin du direct. Sinon l'ancien catalogue reste affiché jusqu'à la bascule finale.
+  const oldEmpty = oldCid === 0 || (await generationIsEmpty(oldCid));
+  const ctx: Ctx = { source, cid, oldCid, skips, firstGeneration: oldEmpty, counts, flags, report, switched: false };
+
+  report("categories", 0, true);
+  try {
+    try {
+      if (source.type === "m3u") await syncM3u(ctx, t, signal);
+      else if (source.type === "stalker") await syncStalker(ctx, t, signal);
+      else await syncXtream(ctx, t, signal);
+      assertNotAborted(signal);
+    } catch (e) {
+      // Échec ou annulation : la nouvelle génération est jetée, l'ancienne reste intacte.
+      // Première synchro déjà basculée sur le direct : on débranche d'abord la source du catalogue qu'on va vider,
+      // sinon elle pointerait vers rien (liste vide, compteurs faux). Le direct partiel est perdu : la reprise repart à zéro.
+      if (ctx.switched) await db.sources.update(source.id!, { cid: 0, counts: { live: 0, movie: 0, series: 0 } }).catch(() => undefined);
+      await clearCatalog(cid).catch(() => undefined);
+      throw e;
+    }
+    // Réglages de l'utilisateur à reporter sur la nouvelle génération : ordre des catégories, chaînes masquées.
+    if (oldCid) await carryCategoryOrder(oldCid, cid);
+    counts.live = Math.max(0, counts.live - await removeHiddenFromCatalog(cid, source.id!));
+    await db.sources.update(source.id!, { cid, counts, lastSyncAt: Date.now(), state: "ready", error: undefined });
+    if (oldCid) await clearCatalog(oldCid);
+  } finally {
+    await setGenerationPending(cid, false).catch(() => undefined);
+  }
+  report("done", 1, true);
+  return counts;
+}
+
+/** L'ordre des catégories choisi sur l'ancienne génération est reporté sur la nouvelle (les catégories nouvelles passent à la suite). */
+async function carryCategoryOrder(oldCid: number, cid: number): Promise<void> {
+  const inOrder = async (g: number, kind: Kind) => (await db.categories.where("[sourceId+kind]").equals([g, kind]).sortBy("ord"));
+  for (const kind of ["live", "movie", "series"] as const) {
+    const cur = await inOrder(cid, kind);
+    if (!cur.length) continue;
+    const old = (await inOrder(oldCid, kind)).map((c) => c.extId);
+    const byExt = new Map(cur.map((c) => [c.extId, c]));
+    const ups: { key: number; changes: { ord: number } }[] = [];
+    mergeCategoryOrder(cur.map((c) => c.extId), old).forEach((ext, i) => { const c = byExt.get(ext)!; if (c.ord !== i) ups.push({ key: c.id!, changes: { ord: i } }); });
+    if (ups.length) await db.categories.bulkUpdate(ups);
+  }
+}
+
+/** Vrai si la génération n'a plus aucune catégorie (catalogue local perdu). */
+async function generationIsEmpty(cid: number): Promise<boolean> {
+  return (await db.categories.where("[sourceId+kind]").between([cid, ""], [cid, "￿"]).limit(1).count()) === 0;
+}
+
+/**
+ * Écrit les effectifs des catégories d'une génération en cours d'écriture (les écrans ne listent que les catégories non vides).
+ * Appelé à la fin de chaque partie : une génération déjà branchée (première synchro) montre ses catégories sans attendre la fin.
+ * Si la source est déjà branchée, ses totaux (Films, Séries…) suivent.
+ */
+async function flushCategoryCounts(ctx: Ctx, cats: CategoryRow[], ids: number[], catCount: Record<string, number>, kinds: Kind[]) {
+  await db.transaction("rw", db.categories, async () => {
+    for (let i = 0; i < cats.length; i++) {
+      if (!kinds.includes(cats[i]!.kind)) continue;
+      const n = catCount[`${cats[i]!.kind}:${cats[i]!.extId}`] ?? 0;
+      if (n) await db.categories.update(ids[i]!, { count: n });
+    }
+  });
+  if (ctx.switched) await db.sources.update(ctx.source.id!, { counts: { ...ctx.counts } });
+}
+
+type ReportFn = (phase: SyncProgress["phase"], ratio: number, force?: boolean) => void;
+
+async function syncXtream(ctx: Ctx, t: Transport, signal?: AbortSignal) {
+  const { source, cid: sourceId, counts, report, flags, firstGeneration } = ctx;
+  const c = credsOf(source);
+  const langs = source.langs;
+
+  const [liveCats, vodCats, serCats] = await Promise.all([
+    xtreamArray<XtreamCategory>(t, c, "get_live_categories", {}, signal),
+    xtreamArray<XtreamCategory>(t, c, "get_vod_categories", {}, signal),
+    xtreamArray<XtreamCategory>(t, c, "get_series_categories", {}, signal),
+  ]);
+  const cats = [
+    ...mapCategories("live", sourceId, liveCats, langs),
+    ...mapCategories("movie", sourceId, vodCats, langs),
+    ...mapCategories("series", sourceId, serCats, langs),
+  ];
+  if (flags) for (const cat of cats) { const f = flags.get(`${cat.kind}:${cat.extId}`); if (f !== undefined) cat.enabled = f; }
+  const enabled: Record<Kind, Set<string>> = { live: new Set(), movie: new Set(), series: new Set() };
+  const catCount: Record<string, number> = {};
+  for (const cat of cats) if (cat.enabled) enabled[cat.kind].add(cat.extId);
+  // Catégories écrites tout de suite (compteurs mis à jour en fin de synchro) : le direct est utilisable dès la fin de sa phase.
+  const catIds = await db.categories.bulkAdd(cats, { allKeys: true });
+  assertNotAborted(signal);
+
+  // Catégories enfants d'un bloc de catalogue : un flux sans catégorie connue est rattaché à "" (affiché dans « Tout »).
+  const bump = (kind: Kind, ext: string) => { const k = `${kind}:${ext}`; catCount[k] = (catCount[k] ?? 0) + 1; };
+
+  // --- Direct ---
+  report("live", 0, true);
+  let liveOrd = 0;
+  const approxLive = Math.max(1, liveCats.length * 60);
+  await streamIntoDb<XtreamLive>(t, c, "get_live_streams", enabled.live, signal, async (items) => {
+    const rows: ChannelRow[] = [];
+    for (const s of items) {
+      if (!enabled.live.has(String(s.category_id))) continue;
+      const p = parseChannelName(String(s.name ?? ""));
+      bump("live", String(s.category_id));
+      rows.push({
+        sourceId, catExt: String(s.category_id), ord: liveOrd++, streamId: toNum(s.stream_id), num: toNum(s.num, liveOrd),
+        name: String(s.name ?? ""), display: p.displayName, norm: normText(p.displayName), words: p.isSeparator ? [] : wordKeys(sourceId, normText(p.displayName)), country: p.country, q: p.quality, flags: p.flags,
+        sep: p.isSeparator ? 1 : 0, logo: s.stream_icon ? String(s.stream_icon) : null,
+        // Certains panels envoient un identifiant de guide NUMÉRIQUE : sans String(), le guide entier échouait (toLowerCase).
+        epg: s.epg_channel_id ? String(s.epg_channel_id) : null, archive: toNum(s.tv_archive) === 1 ? 1 : 0,
+      });
+    }
+    if (rows.length) await db.channels.bulkAdd(rows);
+    counts.live = liveOrd;
+    report("live", Math.min(0.99, liveOrd / approxLive));
+  });
+  counts.live = (await db.channels.where("[sourceId+ord]").between([sourceId, -1], [sourceId, Infinity]).filter((r) => r.sep === 0).count());
+  // Les catégories du direct deviennent « non vides » AVANT la bascule : sinon le direct branché n'afficherait aucune catégorie.
+  await flushCategoryCounts(ctx, cats, catIds, catCount, ["live"]);
+  // Première synchro : on bascule dès maintenant pour permettre de regarder le direct pendant que films et séries arrivent.
+  if (firstGeneration) { await db.sources.update(source.id!, { cid: sourceId, counts: { ...counts } }); ctx.switched = true; }
+  report("live", 1, true);
+
+  // --- Films ---
+  report("movie", 0, true);
+  let movieOrd = 0;
+  await streamIntoDb<XtreamVod>(t, c, "get_vod_streams", enabled.movie, signal, async (items) => {
+    const rows: MovieRow[] = [];
+    for (const m of items) {
+      if (!enabled.movie.has(String(m.category_id))) continue;
+      const ct = cleanTitle(String(m.name ?? ""));
+      bump("movie", String(m.category_id));
+      rows.push({
+        sourceId, catExt: String(m.category_id), ord: movieOrd++, streamId: toNum(m.stream_id), name: String(m.name ?? ""),
+        title: ct.title, norm: normText(ct.title), words: wordKeys(sourceId, normText(ct.title)), year: ct.year, poster: m.stream_icon || null,
+        rating: rating10(m.rating, m.rating_5based), ext: m.container_extension || "mp4", added: toNum(m.added) * 1000,
+      });
+    }
+    if (rows.length) await db.movies.bulkAdd(rows);
+    counts.movie = movieOrd;
+    report("movie", Math.min(0.99, movieOrd / Math.max(1, vodCats.length * 200)));
+  });
+  counts.movie = movieOrd;
+  await flushCategoryCounts(ctx, cats, catIds, catCount, ["movie"]);
+  report("movie", 1, true);
+
+  // --- Séries ---
+  report("series", 0, true);
+  let serOrd = 0;
+  await streamIntoDb<XtreamSeries>(t, c, "get_series", enabled.series, signal, async (items) => {
+    const rows: SeriesRow[] = [];
+    for (const s of items) {
+      if (!enabled.series.has(String(s.category_id))) continue;
+      const ct = cleanTitle(String(s.name ?? ""));
+      bump("series", String(s.category_id));
+      const rel = String(s.releaseDate ?? s.release_date ?? "");
+      rows.push({
+        sourceId, catExt: String(s.category_id), ord: serOrd++, seriesId: toNum(s.series_id), name: String(s.name ?? ""),
+        title: ct.title, norm: normText(ct.title), words: wordKeys(sourceId, normText(ct.title)), year: ct.year ?? (/^\d{4}/.test(rel) ? parseInt(rel.slice(0, 4), 10) : null),
+        poster: s.cover || null, backdrop: firstString(s.backdrop_path), plot: s.plot ? String(s.plot).slice(0, 600) : null,
+        rating: rating10(s.rating, s.rating_5based), added: toNum(s.last_modified) * 1000,
+      });
+    }
+    if (rows.length) await db.series.bulkAdd(rows);
+    counts.series = serOrd;
+    report("series", Math.min(0.99, serOrd / Math.max(1, serCats.length * 100)));
+  });
+  counts.series = serOrd;
+  await flushCategoryCounts(ctx, cats, catIds, catCount, ["series"]);
+  report("series", 1, true);
+}
+
+/**
+ * Récupère `action` en un seul appel (flux) ; si le serveur ou le proxy échoue sur la réponse complète,
+ * retombe sur un appel par catégorie activée (proxys à limite de taille, serveurs capricieux).
+ */
+async function streamIntoDb<T>(
+  t: Transport, c: XtreamCreds, action: string, enabledCats: Set<string>, signal: AbortSignal | undefined,
+  onBatch: (items: T[]) => Promise<void>,
+) {
+  if (enabledCats.size === 0) return;
+  // Un même élément n'est jamais transmis deux fois (liste complète coupée, puis reprise par catégorie).
+  const seen = new Set<string>();
+  const perCat = new Map<string, number>();
+  let lastCat: string | null = null;
+  let contiguous = true; // la liste complète arrive groupée par catégorie
+  const deduped = async (items: T[]) => {
+    const fresh: T[] = [];
+    for (const o of items) {
+      const r = o as { stream_id?: unknown; series_id?: unknown; category_id?: unknown };
+      const id = String(r.stream_id ?? r.series_id ?? "");
+      if (id) { if (seen.has(id)) continue; seen.add(id); }
+      const cat = String(r.category_id);
+      if (cat !== lastCat) { if (perCat.has(cat)) contiguous = false; lastCat = cat; }
+      perCat.set(cat, (perCat.get(cat) ?? 0) + 1);
+      fresh.push(o);
+    }
+    if (fresh.length) await onBatch(fresh);
+  };
+  let todo = [...enabledCats];
+  try {
+    const res = await xtreamStream(t, c, action, {}, signal);
+    await streamObjects<T>(res, deduped, { signal, batchSize: 3000 });
+    return;
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    // Liste coupée et groupée par catégorie : on ne reprend que les catégories absentes et la dernière (incomplète).
+    if (e instanceof TruncatedError && contiguous) todo = todo.filter((id) => !perCat.has(id) || id === lastCat);
+    console.warn(`[sync] ${action} : liste complète indisponible (${e instanceof Error ? e.message : e}), reprise sur ${todo.length} catégorie(s)`);
+  }
+  let failed = 0;
+  for (const id of todo) {
+    // Deux essais par catégorie (une coupure isolée ne doit pas la vider) ; les doublons sont filtrés.
+    let ok = false;
+    for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+      assertNotAborted(signal);
+      try {
+        const res = await xtreamStream(t, c, action, { category_id: id }, signal);
+        await streamObjects<T>(res, deduped, { signal, batchSize: 3000 });
+        ok = true;
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") throw e;
+      }
+    }
+    if (!ok) failed++;
+  }
+  // Serveur injoignable ou en erreur (réseau pas encore prêt au démarrage, limite de connexions…) : sans élément reçu, ou avec
+  // la moitié des catégories en échec, la synchro échoue franchement et l'ancien catalogue reste en place. Avant, la partie
+  // restait vide, la synchro « réussissait » et l'ancienne génération était supprimée : toutes les catégories disparaissaient.
+  let received = 0;
+  for (const n of perCat.values()) received += n;
+  if (failed > 0 && (received === 0 || failed * 2 >= todo.length)) throw new Error(`${action} : réponse du serveur indisponible`);
+}
+
+/**
+ * Réapplique les catégories activées/masquées de la génération précédente. Les catégories Séries du module `type=series`
+ * portent des identifiants préfixés « s: » : ceux de la VOD (ancienne génération) n'y figurent donc plus. Repli par NOM
+ * pour retrouver le choix de l'utilisateur ; si malgré cela aucune catégorie Séries n'est activée alors que l'utilisateur
+ * en avait, on les réactive (le filtre de langues ne doit pas faire disparaître toutes les séries lors du changement d'identifiants).
+ */
+export function applyStalkerFlags(cats: CategoryRow[], flags: Map<string, 0 | 1>): void {
+  for (const cat of cats) {
+    const f = flags.get(`${cat.kind}:${cat.extId}`) ?? (cat.kind === "series" && cat.extId.startsWith("s:") ? flags.get(`series#${cat.name}`) : undefined);
+    if (f !== undefined) cat.enabled = f;
+  }
+  const moduleSeries = cats.filter((c) => c.kind === "series" && c.extId.startsWith("s:"));
+  const hadSeries = [...flags].some(([k, v]) => k.startsWith("series:") && v === 1);
+  if (moduleSeries.length && hadSeries && !moduleSeries.some((c) => c.enabled)) for (const c of moduleSeries) c.enabled = 1;
+}
+
+/** Condensé numérique stable d'un identifiant non numérique (série du module `type=series`), hors de la plage des identifiants du portail. */
+export function stalkerSeriesNumericId(id: string): number {
+  if (/^\d{1,12}$/.test(id)) return Number(id);
+  let a = 0x811c9dc5, b = 0x01000193;
+  for (let i = 0; i < id.length; i++) {
+    a = Math.imul(a ^ id.charCodeAt(i), 0x01000193) >>> 0;
+    b = Math.imul(b + id.charCodeAt(i), 0x85ebca6b) >>> 0;
+  }
+  return 2 ** 41 + (a >>> 0) * 256 + (b & 0xff);
+}
+
+type RowLike = { id?: number; sourceId: number; catExt: string; ord: number; norm: string; words?: string[] };
+
+/**
+ * Portail Stalker : genres + toutes les chaînes (`get_all_channels`, sinon pages), puis films (catégories VOD) et séries.
+ * Séries : si le portail propose le module `type=series` (Ministra récent), ses catégories servent aux Séries ; sinon
+ * elles viennent de la VOD (films et séries mêlés : une série porte `is_series` ou un tableau `series`). Seules les
+ * catégories ACTIVES (langues choisies) sont téléchargées : un portail sert 14 titres par page.
+ *
+ * Tolérante : une catégorie en échec (erreur, délai, réponse vide) est journalisée et sautée, son contenu précédent
+ * (génération courante du catalogue) est recopié dans la nouvelle ; une liste de catégories illisible saute la partie
+ * entière (le direct reste, rien n'est perdu). Le nombre de catégories sautées remonte à l'interface.
+ */
+async function syncStalker(ctx: Ctx, t: Transport, signal?: AbortSignal) {
+  const { source, cid: sourceId, oldCid, counts, report, flags, firstGeneration, skips } = ctx;
+  const log = new StalkerSyncLog();
+  const sc = stalkerOf(t, source, signal, log);
+  const portal = source.server;
+  const langs = source.langs;
+  const isAbort = (e: unknown) => (e as Error)?.name === "AbortError" || !!signal?.aborted;
+
+  const genres = await sc.genres();
+  // Listes de catégories Films et Séries : illisible = partie sautée (null), plus d'échec global.
+  let vodCats: StalkerCategory[] | null = null;
+  try { vodCats = await sc.vodCategories(); } catch (e) { if (isAbort(e)) throw e; log.skipped("categories", "vod", e); }
+  let moduleCats: StalkerCategory[] = [];
+  try { moduleCats = await sc.seriesCategories(); } catch (e) { if (isAbort(e)) throw e; log.skipped("categories", "series", e); }
+  log.seriesModule(moduleCats.length > 0, moduleCats.length);
+  const seriesCats = moduleCats.length ? moduleCats : vodCats;
+  const moduleMode = moduleCats.length > 0;
+
+  const asX = (l: { id: string; title: string }[]) => l.map((c) => ({ category_id: c.id, category_name: c.title }));
+  const cats = [
+    ...mapCategories("live", sourceId, asX(genres), langs),
+    ...(vodCats ? mapCategories("movie", sourceId, asX(vodCats), langs) : []),
+    ...(seriesCats ? mapCategories("series", sourceId, asX(seriesCats), langs) : []),
+  ];
+  if (flags) applyStalkerFlags(cats, flags);
+  const enabled: Record<Kind, Set<string>> = { live: new Set(), movie: new Set(), series: new Set() };
+  for (const cat of cats) if (cat.enabled) enabled[cat.kind].add(cat.extId);
+  const catIds = await db.categories.bulkAdd(cats, { allKeys: true });
+  const catCount: Record<string, number> = {};
+  const bump = (kind: Kind, ext: string, n = 1) => { const k = `${kind}:${ext}`; catCount[k] = (catCount[k] ?? 0) + n; };
+  const s = (o: StalkerItem, k: string) => { const v = o[k]; return v == null || typeof v === "object" ? "" : String(v).trim(); };
+  assertNotAborted(signal);
+
+  let movieOrd = 0, serOrd = 0;
+  const ord = { movie: () => movieOrd++, series: () => serOrd++ };
+
+  /** Recopie dans la nouvelle génération le contenu précédent (une catégorie, ou toute la partie si `catExt` est null). */
+  const keepFromOld = async (kind: "movie" | "series", catExt: string | null) => {
+    if (!oldCid) return;
+    const table = (kind === "movie" ? db.movies : db.series) as unknown as Table<RowLike, number>;
+    const copy = (rows: RowLike[]) => rows.map(({ id: _id, ...r }) => ({ ...r, sourceId, ord: ord[kind](), words: wordKeys(sourceId, r.norm) }));
+    if (catExt !== null) {
+      const old = await table.where("[sourceId+catExt+ord]").between([oldCid, catExt, -1], [oldCid, catExt, Infinity]).toArray();
+      for (let i = 0; i < old.length; i += 5000) await table.bulkAdd(copy(old.slice(i, i + 5000)) as RowLike[]);
+      bump(kind, catExt, old.length);
+      return;
+    }
+    // Partie entière : catégories et éléments de l'ancienne génération, par tranches (jusqu'à plusieurs centaines de milliers de lignes).
+    const oldCats = await db.categories.where("[sourceId+kind]").equals([oldCid, kind]).toArray();
+    if (oldCats.length) await db.categories.bulkAdd(oldCats.map(({ id: _id, ...c }) => ({ ...c, sourceId })));
+    const n = await table.where("[sourceId+ord]").between([oldCid, -1], [oldCid, Infinity]).count();
+    for (let from = 0; from < n; from += 5000) {
+      const old = await table.where("[sourceId+ord]").between([oldCid, from], [oldCid, from + 4999], true, true).toArray();
+      if (old.length) await table.bulkAdd(copy(old) as RowLike[]);
+    }
+  };
+  const synced = { vod: { read: 0, skipped: 0, items: 0 }, series: { read: 0, skipped: 0, items: 0 } };
+  /** Catégorie sautée : comptée une seule fois (une catégorie VOD sautée en Films puis en Séries), contenu précédent gardé. */
+  const skipCategory = async (catId: string, type: SyncType, e: unknown) => {
+    skips.distinct.add(catId);
+    synced[type].skipped++;
+    log.skipped("list", type, e);
+    if (enabled.movie.has(catId)) await keepFromOld("movie", catId);
+    if (enabled.series.has(catId)) await keepFromOld("series", catId);
+  };
+  /** Partie entière sautée (liste de catégories illisible) : ancien contenu recopié, compté pour ses catégories connues. */
+  const skipPart = async (kind: "movie" | "series") => {
+    if (oldCid) {
+      const known = await db.categories.where("[sourceId+kind]").equals([oldCid, kind]).filter((c) => c.enabled === 1).toArray();
+      for (const c of known) skips.distinct.add(c.extId);
+      if (!known.length) skips.extra++;
+    } else skips.extra++;
+    log.skipped("part", kind === "movie" ? "vod" : "series", null);
+    await keepFromOld(kind, null);
+  };
+
+  // --- Direct ---
+  report("live", 0, true);
+  const rows: ChannelRow[] = [];
+  let liveOrd = 0;
+  for (const o of await sc.allChannels()) {
+    const cat = s(o, "tv_genre_id"), cmd = s(o, "cmd"), name = s(o, "name");
+    if (!cmd || !name || !enabled.live.has(cat)) continue;
+    const p = parseChannelName(name);
+    bump("live", cat);
+    rows.push({
+      sourceId, catExt: cat, ord: liveOrd++, streamId: toNum(o.id), num: toNum(o.number, liveOrd), name, display: p.displayName,
+      norm: normText(p.displayName), words: p.isSeparator ? [] : wordKeys(sourceId, normText(p.displayName)), country: p.country, q: p.quality,
+      flags: p.flags, sep: p.isSeparator ? 1 : 0, logo: absoluteUrl(portal, o.logo), epg: s(o, "xmltv_id") || null, archive: 0,
+      url: stalkerLink("itv", cmd),
+    });
+  }
+  for (let i = 0; i < rows.length; i += 5000) await db.channels.bulkAdd(rows.slice(i, i + 5000));
+  counts.live = rows.filter((r) => !r.sep).length;
+  await flushCategoryCounts(ctx, cats, catIds, catCount, ["live"]);
+  if (firstGeneration) { await db.sources.update(source.id!, { cid: sourceId, counts: { ...counts } }); ctx.switched = true; }
+  report("live", 1, true);
+
+  // --- Listes de catégories illisibles : parties sautées ---
+  if (!vodCats) await skipPart("movie");
+  if (!seriesCats) await skipPart("series");
+  counts.movie = movieOrd; counts.series = serOrd;
+
+  // --- Films (et séries de la VOD tant que le portail n'a pas de module séries) ---
+  report("movie", 0, true);
+  const vodWanted = (vodCats ?? []).map((c) => c.id).filter((id) => enabled.movie.has(id) || (!moduleMode && enabled.series.has(id)));
+  const moduleWanted = moduleMode ? moduleCats.map((c) => c.id).filter((id) => enabled.series.has(id)) : [];
+  const total = Math.max(1, vodWanted.length + moduleWanted.length);
+  let done = 0;
+  const bulk = async (movies: MovieRow[], series: SeriesRow[]) => {
+    for (let i = 0; i < movies.length; i += 5000) await db.movies.bulkAdd(movies.slice(i, i + 5000));
+    for (let i = 0; i < series.length; i += 5000) await db.series.bulkAdd(series.slice(i, i + 5000));
+    counts.movie = movieOrd; counts.series = serOrd;
+    report("movie", Math.min(0.99, ++done / total));
+  };
+  const common = (o: StalkerItem, name: string) => {
+    const ct = cleanTitle(name);
+    const year = /^\d{4}/.test(s(o, "year")) ? parseInt(s(o, "year").slice(0, 4), 10) : ct.year;
+    return {
+      ct, year, rating: Math.min(10, toNum(o.rating_imdb) || toNum(o.rating_kinopoisk)),
+      added: Date.parse(s(o, "added").replace(" ", "T") + "Z") || 0, poster: absoluteUrl(portal, o.screenshot_uri ?? o.cover_big),
+      eps: Array.isArray(o.series) ? (o.series as unknown[]).map(Number).filter(Number.isFinite) : [],
+    };
+  };
+
+  for (const catId of vodWanted) {
+    assertNotAborted(signal);
+    let items: StalkerItem[];
+    try { items = await sc.vodOfCategory(catId); } catch (e) { if (isAbort(e)) throw e; await skipCategory(catId, "vod", e); await bulk([], []); continue; }
+    synced.vod.read++;
+    const movies: MovieRow[] = [];
+    const series: SeriesRow[] = [];
+    for (const o of items) {
+      const cmd = s(o, "cmd"), name = s(o, "name");
+      const { ct, year, rating, added, poster, eps } = common(o, name);
+      const isSeries = o.is_series === true || o.is_series === 1 || o.is_series === "1" || eps.length > 0;
+      // Une série n'a pas toujours de commande (ses épisodes en ont) ; un film sans commande est illisible.
+      if (!name || (!cmd && !isSeries)) continue;
+      if (isSeries) {
+        if (!enabled.series.has(catId)) continue;
+        bump("series", catId);
+        series.push({
+          sourceId, catExt: catId, ord: serOrd++, seriesId: toNum(o.id), name, title: ct.title, norm: normText(ct.title), words: wordKeys(sourceId, normText(ct.title)),
+          year, poster, backdrop: null, plot: s(o, "description").slice(0, 600) || null, rating, added, url: cmd ? stalkerLink("vod", cmd) : undefined, eps,
+        });
+      } else {
+        if (!enabled.movie.has(catId)) continue;
+        bump("movie", catId);
+        movies.push({
+          sourceId, catExt: catId, ord: movieOrd++, streamId: toNum(o.id), name, title: ct.title, norm: normText(ct.title), words: wordKeys(sourceId, normText(ct.title)),
+          year, poster, rating, ext: "", added, url: stalkerLink("vod", cmd),
+        });
+      }
+    }
+    synced.vod.items += movies.length + series.length;
+    await bulk(movies, series);
+  }
+
+  // Films (et séries de la VOD) terminés : leurs catégories deviennent visibles sans attendre le module séries.
+  counts.movie = movieOrd; counts.series = serOrd;
+  await flushCategoryCounts(ctx, cats, catIds, catCount, ["movie", "series"]);
+
+  // --- Séries du module `type=series` (identifiants du portail préfixés « s: » dans les catégories) ---
+  const usedIds = new Set<number>();
+  for (const catId of moduleWanted) {
+    assertNotAborted(signal);
+    let items: StalkerItem[];
+    try { items = await sc.seriesOfCategory(catId); } catch (e) { if (isAbort(e)) throw e; await skipCategory(catId, "series", e); await bulk([], []); continue; }
+    synced.series.read++;
+    const series: SeriesRow[] = [];
+    for (const o of items) {
+      const id = s(o, "id"), name = s(o, "name");
+      if (!id || !name) continue;
+      const { ct, year, rating, added, poster, eps } = common(o, name);
+      let seriesId = stalkerSeriesNumericId(id);
+      while (usedIds.has(seriesId)) seriesId++;
+      usedIds.add(seriesId);
+      bump("series", catId);
+      series.push({
+        sourceId, catExt: catId, ord: serOrd++, seriesId, portalId: id, name, title: ct.title, norm: normText(ct.title), words: wordKeys(sourceId, normText(ct.title)),
+        year, poster, backdrop: null, plot: s(o, "description").slice(0, 600) || null, rating, added, url: stalkerLink("series", s(o, "cmd")), eps,
+      });
+    }
+    synced.series.items += series.length;
+    await bulk([], series);
+  }
+  if (!moduleMode) { synced.series.read = synced.vod.read; synced.series.skipped = synced.vod.skipped; }
+  log.summary("vod", synced.vod.read, synced.vod.skipped, movieOrd);
+  log.summary("series", synced.series.read, synced.series.skipped, serOrd);
+  counts.movie = movieOrd; counts.series = serOrd;
+  report("movie", 1, true);
+  report("series", 1, true);
+  await flushCategoryCounts(ctx, cats, catIds, catCount, ["live", "movie", "series"]);
+}
+
+async function syncM3u({ source, cid: sourceId, counts, report }: Ctx, t: Transport, signal?: AbortSignal) {
+  report("live", 0, true);
+  const text = await readM3u(t, source, signal);
+  const entries = parseM3u(text);
+  // Réponse qui n'est pas une playlist (page d'erreur, corps vide) ou playlist vidée alors que la source avait des chaînes :
+  // échec franc, l'ancien catalogue reste en place (sinon il était remplacé par un catalogue vide).
+  if (!text.includes("#EXTM3U") && !text.includes("#EXTINF")) throw new Error("not-m3u");
+  if (entries.length === 0 && source.counts.live > 0) throw new Error("not-m3u");
+  const groups = new Map<string, number>();
+  const rows: ChannelRow[] = [];
+  entries.forEach((e, i) => {
+    const group = (e.groupTitle ?? "").trim() || "—";
+    if (!groups.has(group)) groups.set(group, groups.size);
+    const p = parseChannelName(e.name);
+    rows.push({
+      sourceId, catExt: group, ord: i, streamId: i + 1, num: e.tvgChno ?? i + 1, name: e.name, display: p.displayName,
+      norm: normText(p.displayName), words: p.isSeparator ? [] : wordKeys(sourceId, normText(p.displayName)), country: p.country, q: p.quality, flags: p.flags, sep: p.isSeparator ? 1 : 0,
+      logo: e.tvgLogo, epg: e.tvgId, archive: e.catchUp ? 1 : 0, url: e.url,
+      ...(e.protected ? { drm: 1 as const } : {}),
+    });
+  });
+  for (let i = 0; i < rows.length; i += 5000) {
+    assertNotAborted(signal);
+    await db.channels.bulkAdd(rows.slice(i, i + 5000));
+    report("live", Math.min(0.99, i / Math.max(1, rows.length)));
+  }
+  counts.live = rows.filter((r) => !r.sep).length;
+  // Effectifs par groupe en un seul passage (avant : un filter() sur toutes les lignes pour chaque groupe).
+  const perGroup = new Map<string, number>();
+  for (const r of rows) perGroup.set(r.catExt, (perGroup.get(r.catExt) ?? 0) + 1);
+  const cats: CategoryRow[] = [...groups].map(([name, ord]) => {
+    return {
+      sourceId, kind: "live" as const, extId: name, name, label: prettyCategoryName(name), badge: categoryLang(name) === OTHER_LANG ? null : categoryLang(name),
+      count: perGroup.get(name) ?? 0, enabled: 1 as const, adult: 0 as const, ord,
+    };
+  });
+  await db.categories.bulkAdd(cats);
+  report("live", 1, true);
+}

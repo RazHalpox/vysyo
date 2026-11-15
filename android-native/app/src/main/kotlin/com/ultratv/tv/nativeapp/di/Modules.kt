@@ -1,0 +1,105 @@
+package com.ultratv.tv.nativeapp.di
+
+import android.content.Context
+import androidx.room.Room
+import com.ultratv.tv.nativeapp.data.db.CategoryDao
+import com.ultratv.tv.nativeapp.data.db.ChannelDao
+import com.ultratv.tv.nativeapp.data.db.UltraDb
+import dagger.Module
+import dagger.Provides
+import dagger.hilt.InstallIn
+import dagger.hilt.android.qualifiers.ApplicationContext
+import dagger.hilt.components.SingletonComponent
+import okhttp3.OkHttpClient
+import java.util.concurrent.TimeUnit
+import javax.inject.Singleton
+
+@Module
+@InstallIn(SingletonComponent::class)
+object DatabaseModule {
+
+    @Provides @Singleton
+    fun provideDb(@ApplicationContext ctx: Context): UltraDb =
+        Room.databaseBuilder(ctx, UltraDb::class.java, "ultra-tv.db")
+            // Moteur SQLite embarqué (3.49) au lieu de celui du système : mêmes fichiers, même API. Seulement si sa
+            // bibliothèque native se charge (sinon, ex. ABI inattendue ou tests sur ordinateur : moteur du système).
+            .apply { if (BundledSqlite.available) openHelperFactory(io.requery.android.database.sqlite.RequerySQLiteOpenHelperFactory()) }
+            // Versions 1..9 predate schema export; there are no Migration objects
+            // for them, so we wipe-and-rebuild when upgrading from any of them.
+            // FUTURE: any bump past 10 MUST ship an explicit Migration and be
+            // registered here via .addMigrations(MIGRATION_10_11, ...). Do NOT
+            // widen this destructive range — the exported schemas under
+            // app/schemas let Room auto-generate / verify those migrations.
+            .addMigrations(*com.ultratv.tv.nativeapp.data.db.ALL_MIGRATIONS)
+            .fallbackToDestructiveMigrationFrom(1, 2, 3, 4, 5, 6, 7, 8, 9)
+            // Version plus ANCIENNE installée par-dessus une plus récente (APK d'un vieux lien, pré-version puis
+            // version publiée…) : sans repli, Room lève « A migration from 22 to 21 was required » à chaque lancement
+            // et l'appli ne démarre plus du tout. On reconstruit la base (le catalogue se resynchronise) plutôt que de
+            // bloquer l'utilisateur.
+            .fallbackToDestructiveMigrationOnDowngrade(dropAllTables = true)
+            .addCallback(com.ultratv.tv.nativeapp.data.db.DefaultProfileCallback())
+            // WAL imposé : Room le désactive sur les appareils « low RAM » (beaucoup de box), et alors la synchro du
+            // catalogue bloque toute lecture (écrans figés). synchronous=NORMAL est sûr en WAL et évite un fsync
+            // par transaction sur l'eMMC lente ; le journal est borné à 32 Mo.
+            .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
+            .addCallback(object : androidx.room.RoomDatabase.Callback() {
+                override fun onOpen(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                    runCatching { db.query("PRAGMA synchronous = NORMAL").close() }
+                    runCatching { db.query("PRAGMA journal_size_limit = 33554432").close() }
+                    // Cache de pages de 8 Mo (≈ 2 Mo par défaut) : listes, guide et recherche relisent moins le stockage lent.
+                    runCatching { db.query("PRAGMA cache_size = -8000").close() }
+                }
+            })
+            .build()
+
+    @Provides fun provideProviderRawDao(db: UltraDb): com.ultratv.tv.nativeapp.data.db.ProviderRawDao = db.providerDao()
+    @Provides fun provideChannelDao(db: UltraDb): ChannelDao = db.channelDao()
+    @Provides fun provideMovieDao(db: UltraDb): com.ultratv.tv.nativeapp.data.db.MovieDao = db.movieDao()
+    @Provides fun provideSeriesDao(db: UltraDb): com.ultratv.tv.nativeapp.data.db.SeriesDao = db.seriesDao()
+    @Provides fun provideEpisodeDao(db: UltraDb): com.ultratv.tv.nativeapp.data.db.EpisodeDao = db.episodeDao()
+    @Provides fun provideCategoryDao(db: UltraDb): CategoryDao = db.categoryDao()
+    @Provides @Singleton fun provideProfileStateStore(@ApplicationContext ctx: Context): com.ultratv.tv.nativeapp.data.profile.ProfileStateStore = com.ultratv.tv.nativeapp.data.profile.DataStoreProfileStateStore(ctx)
+    @Provides fun provideProfileDao(db: UltraDb): com.ultratv.tv.nativeapp.data.profile.ProfileDao = db.profileDao()
+    @Provides fun provideFavoriteDao(db: UltraDb): com.ultratv.tv.nativeapp.data.db.FavoriteDao = db.favoriteDao()
+    @Provides fun provideEpgDao(db: UltraDb): com.ultratv.tv.nativeapp.data.db.EpgDao = db.epgDao()
+    @Provides fun provideWatchHistoryDao(db: UltraDb): com.ultratv.tv.nativeapp.data.db.WatchHistoryDao = db.watchHistoryDao()
+    @Provides fun provideRecordingDao(db: UltraDb): com.ultratv.tv.nativeapp.data.db.RecordingDao = db.recordingDao()
+    @Provides fun provideVodInfoDao(db: UltraDb): com.ultratv.tv.nativeapp.data.db.VodInfoDao = db.vodInfoDao()
+    @Provides fun provideTmdbDao(db: UltraDb): com.ultratv.tv.nativeapp.data.tmdb.TmdbDao = db.tmdbDao()
+    @Provides fun provideReminderDao(db: UltraDb): com.ultratv.tv.nativeapp.data.reminders.ReminderDao = db.reminderDao()
+    @Provides fun provideGenreDao(db: UltraDb): com.ultratv.tv.nativeapp.data.db.GenreDao = db.genreDao()
+    @Provides fun provideChannelOrderDao(db: UltraDb): com.ultratv.tv.nativeapp.data.db.ChannelOrderDao = db.channelOrderDao()
+    @Provides fun provideDownloadDao(db: UltraDb): com.ultratv.tv.nativeapp.data.downloads.DownloadDao = db.downloadDao()
+}
+
+@Module
+@InstallIn(SingletonComponent::class)
+object NetworkModule {
+
+    @Provides @Singleton
+    fun provideOkHttp(
+        monitor: com.ultratv.tv.nativeapp.adaptive.NetworkMonitor,
+        @ApplicationContext ctx: Context,
+    ): OkHttpClient = OkHttpClient.Builder()
+        // DNS choisi dans les Réglages (lu à chaque résolution, repli sur le système) : hérité par tous les newBuilder().
+        .dns(com.ultratv.tv.nativeapp.data.net.dns.AppDns.also { it.attach(ctx) })
+        // Mesure continue du débit et de la latence réels (alimente le profil adaptatif).
+        .addNetworkInterceptor(monitor.interceptor)
+        // Repli automatique tv.weedy.dpdns.org <-> workers.dev sur panne réseau (sans effet pour les autres hôtes).
+        .addInterceptor(com.ultratv.tv.nativeapp.data.config.WorkerFallbackInterceptor())
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(60, TimeUnit.SECONDS)
+        .build()
+}
+
+/** Moteur SQLite embarqué disponible (bibliothèque native chargée) ; jamais sous Robolectric. */
+object BundledSqlite {
+    val available: Boolean by lazy {
+        if (android.os.Build.FINGERPRINT == "robolectric") false
+        else runCatching { System.loadLibrary("sqlite3x") }
+            .onFailure { android.util.Log.w("UltraDb", "SQLite embarqué indisponible, moteur du système : $it") }
+            .onSuccess { android.util.Log.i("UltraDb", "SQLite embarqué chargé") }
+            .isSuccess
+    }
+}

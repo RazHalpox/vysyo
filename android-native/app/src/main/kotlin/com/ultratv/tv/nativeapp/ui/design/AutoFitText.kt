@@ -1,0 +1,127 @@
+package com.ultratv.tv.nativeapp.ui.design
+
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.isSpecified
+
+/**
+ * Texte de l'application (même signature que celui d'androidx.tv.material3), avec UNE règle commune à tous les écrans et
+ * tous les appareils : un texte limité à une ligne (« … ») PASSE À LA LIGNE quand il dépasse (deux lignes). Si son
+ * conteneur n'a pas la hauteur de deux lignes, il reste sur une ligne (jamais de chevauchement) ; sur téléphone et
+ * tablette, il réduit alors sa taille (jusqu'à [AutoFit.MIN_SCALE]) avant d'être coupé.
+ */
+@Composable
+fun Text(
+    text: String,
+    modifier: Modifier = Modifier,
+    color: Color = Color.Unspecified,
+    fontSize: TextUnit = TextUnit.Unspecified,
+    fontStyle: FontStyle? = null,
+    fontWeight: FontWeight? = null,
+    fontFamily: FontFamily? = null,
+    letterSpacing: TextUnit = TextUnit.Unspecified,
+    textDecoration: TextDecoration? = null,
+    textAlign: TextAlign? = null,
+    lineHeight: TextUnit = TextUnit.Unspecified,
+    overflow: TextOverflow = TextOverflow.Clip,
+    softWrap: Boolean = true,
+    maxLines: Int = Int.MAX_VALUE,
+    minLines: Int = 1,
+    onTextLayout: (TextLayoutResult) -> Unit = {},
+    style: TextStyle = androidx.tv.material3.LocalTextStyle.current,
+) {
+    val touch = com.ultratv.tv.nativeapp.ui.mobile.LocalTouch.current
+    val base = if (fontSize.isSpecified) fontSize else style.fontSize
+    if (!LocalTextWrap.current || !AutoFit.applies(maxLines, overflow, softWrap)) {
+        androidx.tv.material3.Text(
+            text = text, modifier = modifier, color = color, fontSize = fontSize, fontStyle = fontStyle, fontWeight = fontWeight, fontFamily = fontFamily,
+            letterSpacing = letterSpacing, textDecoration = textDecoration, textAlign = textAlign, lineHeight = lineHeight, overflow = overflow,
+            softWrap = softWrap, maxLines = maxLines, minLines = minLines, onTextLayout = onTextLayout, style = style,
+        )
+        return
+    }
+    // 1) deux lignes ; 2) le conteneur n'a pas la hauteur de deux lignes : retour à une ligne ;
+    // 3) téléphone / tablette : réduction de la taille (jusqu'à 80 %) avant « … ».
+    var lines by remember(text, base, maxLines) { mutableIntStateOf(AutoFit.wrapLines(maxLines)) }
+    var scale by remember(text, base) { mutableFloatStateOf(1f) }
+    var ready by remember(text, base) { mutableStateOf(false) }
+    // Un mot seul trop long pour la ligne : réduction autorisée aussi sur TV (sinon « Recherch… »).
+    var mayShrink by remember(text, base) { mutableStateOf(false) }
+    val size = if (base.isSpecified) base * scale else base
+    androidx.tv.material3.Text(
+        text = text, modifier = modifier.drawWithContent { if (ready) drawContent() }, color = color, fontSize = size,
+        fontStyle = fontStyle, fontWeight = fontWeight, fontFamily = fontFamily,
+        letterSpacing = if (letterSpacing.isSpecified) letterSpacing * scale else letterSpacing, textDecoration = textDecoration,
+        textAlign = textAlign, lineHeight = lineHeight, overflow = overflow, softWrap = softWrap, maxLines = lines, minLines = minLines,
+        onTextLayout = { r ->
+            val cut = r.lineCount > 0 && r.isLineEllipsized(r.lineCount - 1)
+            // Retour à la ligne AU MILIEU d'un mot (« Recherch / er ») : jamais — une ligne, puis réduction de la taille.
+            val midWord = r.lineCount > 1 && AutoFit.breaksWord(text, r.getLineEnd(0, visibleEnd = true))
+            if (midWord) mayShrink = true
+            when (val step = AutoFit.next(lines, scale, cut = cut || midWord, tooTall = (r.didOverflowHeight && r.lineCount > maxLines) || (midWord && maxLines == 1), touch = (touch || mayShrink || midWord) && base.isSpecified, floor = maxLines)) {
+                null -> ready = true
+                else -> { lines = step.first; scale = step.second }
+            }
+            onTextLayout(r)
+        },
+        style = style,
+    )
+}
+
+/**
+ * Passage à la ligne autorisé (par défaut). Désactivé dans les zones de HAUTEUR FIXE (bandeaux « À la une », surcouche du
+ * direct) : une ligne de plus y poussait les boutons placés dessous jusqu'à les écraser en un trait.
+ */
+val LocalTextWrap = androidx.compose.runtime.staticCompositionLocalOf { true }
+
+/** Bloc sans passage à la ligne automatique (zone de hauteur fixe). */
+@Composable
+fun NoTextWrap(content: @Composable () -> Unit) =
+    androidx.compose.runtime.CompositionLocalProvider(LocalTextWrap provides false, content = content)
+
+/** Règle d'ajustement (pure, testée). */
+object AutoFit {
+    const val MIN_SCALE = 0.8f
+    const val WRAP_LINES = 2
+    private const val STEP = 0.05f
+
+    /** Concerne les textes « une ligne + … » qui peuvent passer à la ligne (pas les pastilles en softWrap = false). */
+    fun applies(maxLines: Int, overflow: TextOverflow, softWrap: Boolean): Boolean =
+        // Une ligne seulement : un texte de 2-3 lignes qui grandit dans une zone de hauteur fixe (carrousel de l'accueil,
+        // clavier) écrasait les boutons placés dessous jusqu'à n'en laisser qu'un trait.
+        maxLines == 1 && overflow == TextOverflow.Ellipsis && softWrap
+
+    /** Lignes tentées d'abord : une de plus que la limite demandée (le texte passe à la ligne au lieu de « … »). */
+    fun wrapLines(maxLines: Int): Int = maxLines + 1
+
+    /**
+     * Étape suivante, ou null quand le rendu est définitif. [tooTall] : le conteneur n'a pas la hauteur des lignes demandées.
+     * [cut] : la dernière ligne finit par « … ».
+     */
+    /** Vrai si la coupure de ligne à [end] tombe entre deux lettres (ou chiffres) d'un même mot. */
+    fun breaksWord(text: String, end: Int): Boolean =
+        end in 1 until text.length && text[end - 1].isLetterOrDigit() && text[end].isLetterOrDigit()
+
+    fun next(lines: Int, scale: Float, cut: Boolean, tooTall: Boolean, touch: Boolean, floor: Int = 1): Pair<Int, Float>? = when {
+        tooTall && lines > floor -> floor to scale
+        cut && lines == floor && touch && scale > MIN_SCALE -> floor to maxOf(MIN_SCALE, scale - STEP)
+        else -> null
+    }
+}

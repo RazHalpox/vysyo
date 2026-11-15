@@ -1,0 +1,313 @@
+import { useLiveQuery } from "dexie-react-hooks";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { db } from "@/db/db";
+import { getOrder, resetOrder, saveOrder } from "@/db/channelOrder";
+import { channelsCol, notInHidden, searchByWords, toggleFavorite } from "@/db/queries";
+import type { ChannelRow, Source } from "@/db/types";
+import { useCategories, useFavorites, useHiddenCats } from "@/hooks/data";
+import { useNowNext } from "@/hooks/epg";
+import { useElementSize, useDebounced } from "@/hooks/misc";
+import { usePagedQuery } from "@/hooks/paged";
+import { useReorderDnd } from "@/hooks/reorder";
+import { FAVORITES_SCOPE, commitMove, mergeOrder, startMove, stepMove, type MoveSession } from "@/lib/channelOrder";
+import { useT } from "@/i18n";
+import { normText } from "@/lib/text";
+import { usePlayer } from "@/player/store";
+import { PreviewSlot } from "@/player/PreviewSlot";
+import { channelTarget } from "@/player/targets";
+import { usePrefs } from "@/state/prefs";
+import { useActiveSource } from "@/state/sources";
+import { useUi } from "@/state/ui";
+import { CategoryList } from "@/ui/CategoryList";
+import { hhmm, QBadge, StateCard } from "@/ui/common";
+import { HScroll } from "@/ui/HScroll";
+import { Icon } from "@/ui/Icon";
+import { Img } from "@/ui/Img";
+import { VList, arrayRows, type Rows, type VListHandle } from "@/ui/Virtual";
+import { NoSource } from "./states";
+
+const FAV = "__fav";
+
+export function Live() {
+  const source = useActiveSource();
+  if (!source) return <NoSource />;
+  return <LiveInner source={source} />;
+}
+
+function ChanRow({ c, source, sel, playing, onPick, extra, extraCls = "", onMenu }: { c: ChannelRow; source: Source; sel: boolean; playing: boolean; onPick: () => void; extra?: object; extraCls?: string; onMenu?: () => void }) {
+  const nn = useNowNext(source, c.epg, c.streamId, false);
+  if (c.sep) return <div className="sep-row" role="presentation"><span className="bar" /><span className="ellipsis">{c.display}</span><span className="rule" /></div>;
+  return (
+    <button className={`chan-row${sel ? " sel" : ""}${playing ? " playing" : ""}${extraCls}`} onClick={onPick} onDoubleClick={() => usePlayer.getState().setMode("full")} onContextMenu={onMenu ? (e) => { e.preventDefault(); onMenu(); } : undefined} role="option" aria-selected={sel} {...extra}>
+      <span className="num mono">{c.num}</span>
+      <span className="logo"><Img src={c.logo} contain /></span>
+      <span className="grow" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <span className="nm ellipsis">{c.display}</span>
+        <span className="sub ellipsis">{nn.now?.title ?? ""}</span>
+      </span>
+      <span className="tags">{c.country && <span className="cbadge">{c.country}</span>}<QBadge q={c.q} /></span>
+    </button>
+  );
+}
+
+function LiveInner({ source }: { source: Source }) {
+  const t = useT();
+  const nav = useNavigate();
+  const prefs = usePrefs();
+  const cats = useCategories(source, "live");
+  const favs = useFavorites(source, "live");
+  const [root, size] = useElementSize<HTMLDivElement>();
+  const wide = size.w >= 1400;
+  const hid = useHiddenCats(source, "live");
+  const nh = useMemo(() => notInHidden<ChannelRow>(hid), [hid]);
+  // Catégorie mémorisée masquée par le profil courant : retour à « Tout ».
+  const rawCat = prefs.liveCat[String(source.id)] ?? "";
+  const cat = hid.has(rawCat) ? "" : rawCat;
+  // « Tout » : sans les chaînes des catégories masquées par le profil courant.
+  const colOf = useCallback((c: string | null) => { const col = channelsCol(source.cid, c); return c == null && nh ? col.filter(nh) : col; }, [source.cid, nh]);
+  const setCat = (c: string) => prefs.set({ liveCat: { ...prefs.liveCat, [String(source.id)]: c } });
+  const [filter, setFilter] = useState("");
+  const dq = useDebounced(filter, 200);
+  const [pop, setPop] = useState(false);
+  const [selId, setSelId] = useState<number | null>(null);
+  const list = useRef<VListHandle>(null);
+  const playing = usePlayer((s) => (s.target?.kind === "live" ? s.target.refId : null));
+
+  // Ordre personnel (déplacement manuel) : une catégorie du fournisseur ou les favoris ; pas la liste « Tout ».
+  const profile = prefs.profileId;
+  const sid = source.id!;
+  const scope = cat === FAV ? FAVORITES_SCOPE : cat !== "" ? cat : null;
+  const order = useLiveQuery(async () => (scope ? await getOrder(profile, sid, scope) : null), [scope, profile, sid]);
+  const [mv, setMv] = useState<(MoveSession & { rows: Map<number, ChannelRow>; natural: number[] }) | null>(null);
+  const filtering = dq.trim().length > 0;
+
+  /** Chaînes de la liste dans l'ordre de la source (sans séparateurs de section). */
+  const loadNatural = useCallback(async (): Promise<ChannelRow[]> => {
+    if (scope === FAVORITES_SCOPE) return (await Promise.all(favs.map((f) => db.channels.where("[sourceId+streamId]").equals([source.cid, f.refId]).first()))).filter((r): r is ChannelRow => !!r);
+    return colOf(cat || null).filter((c) => !c.sep).limit(20000).toArray();
+  }, [scope, favs, source.cid, cat, colOf]);
+
+  // Mode tableau (favoris, filtre texte, liste réordonnée) ou mode paginé (catalogue entier / catégorie).
+  const arrayMode = cat === FAV || filtering || (!!scope && !!order) || !!mv;
+  const arr = useLiveQuery(async () => {
+    if (!arrayMode) return [] as ChannelRow[];
+    const nq = normText(dq);
+    if (scope && (cat === FAV || order)) {
+      const merged = mergeOrder(await loadNatural(), order, (c) => c.streamId);
+      return nq ? merged.filter((r) => r.norm.includes(nq)) : merged;
+    }
+    // Toutes les chaînes : index par mot (au plus 3000, remis dans l'ordre du fournisseur) ; une catégorie : balayage borné par l'index.
+    if (nq && !cat) return (await searchByWords(db.channels, source.cid, nq, 3000, (c) => !c.sep && (!nh || nh(c)))).sort((a, b) => a.ord - b.ord);
+    return colOf(cat || null).filter((c) => !c.sep && c.norm.includes(nq)).limit(3000).toArray();
+  }, [arrayMode, cat, dq, source.cid, order, scope, loadNatural, colOf, nh]);
+  const view = useMemo(() => (mv ? mv.ids.map((i) => mv.rows.get(i)).filter((r): r is ChannelRow => !!r) : arr ?? []), [mv, arr]);
+  const paged = usePagedQuery<ChannelRow>(() => (arrayMode ? null : colOf(cat || null)), [source.cid, source.lastSyncAt, cat, arrayMode, colOf], 120);
+  const rows: Rows<ChannelRow> = useMemo(() => (arrayMode ? arrayRows(view) : paged), [arrayMode, view, paged]);
+  const count = rows.count;
+
+  const selected = useLiveQuery(() => (selId != null ? db.channels.get(selId) : undefined), [selId]);
+  const nn = useNowNext(source, selected?.epg, selected?.streamId);
+  const isFav = !!selected && favs.some((f) => f.refId === selected.streamId);
+
+  const play = useCallback((c: ChannelRow, full = false) => {
+    if (c.sep) return;
+    setSelId(c.id!);
+    usePlayer.getState().open(channelTarget(source, c), full ? "full" : "inline", cat === FAV ? FAVORITES_SCOPE : cat || null);
+  }, [source, cat]);
+  const pick = (c: ChannelRow) => {
+    if (c.sep) return;
+    if (selId === c.id && playing === c.streamId) { usePlayer.getState().setMode("full"); return; }
+    if (prefs.autoPreview) play(c); else setSelId(c.id!);
+  };
+
+  // Sélection initiale : première vraie chaîne.
+  useEffect(() => {
+    if (selId != null || !count) return;
+    let i = 0;
+    const find = () => {
+      for (; i < Math.min(count, 200); i++) { const r = rows.get(i); if (r === undefined) { rows.want(i, i + 20); return false; } if (!r.sep) { setSelId(r.id!); return true; } }
+      return true;
+    };
+    if (!find()) { const iv = setInterval(() => { if (find()) clearInterval(iv); }, 150); return () => clearInterval(iv); }
+  }, [count, rows, selId]);
+  useEffect(() => { setSelId(null); }, [cat, filtering]);
+  useEffect(() => { setMv(null); }, [cat, sid, profile]);
+
+  // Déplacer : une chaîne à la fois, flèches Haut/Bas, Entrée valide, Échap annule (rien n'est écrit avant la validation).
+  const canReorder = !!scope && !!selected && !selected.sep;
+  const beginMove = async (ch: ChannelRow | undefined = selected) => {
+    if (!scope || !ch || mv) return;
+    const nat = await loadNatural();
+    const rowsById = new Map(nat.map((r) => [r.streamId, r] as const));
+    if (!rowsById.has(ch.streamId)) return;
+    const ids = mergeOrder(nat, order, (r) => r.streamId).map((r) => r.streamId);
+    setFilter(""); setSelId(ch.id!);
+    setMv({ ...startMove(scope, ch.streamId, ids, order ?? null), rows: rowsById, natural: nat.map((r) => r.streamId) });
+    list.current?.el?.focus();
+    requestAnimationFrame(() => list.current?.scrollTo(ids.indexOf(ch.streamId), "center"));
+  };
+  const stepTo = (delta: number) => {
+    if (!mv) return;
+    const next = stepMove(mv, delta);
+    if (next === mv) return;
+    setMv({ ...mv, ids: next.ids });
+    list.current?.scrollTo(next.ids.indexOf(next.id));
+  };
+  const endMove = async (ok: boolean) => {
+    if (!mv) return;
+    const m = mv;
+    setMv(null);
+    if (!ok) return;
+    const out = commitMove(m, m.natural);
+    if (out) await saveOrder(profile, sid, m.scope, out);
+  };
+  const dnd = useReorderDnd({
+    enabled: !!scope && !filtering && !mv,
+    axis: "y",
+    getIds: async () => mergeOrder(await loadNatural(), order, (r) => r.streamId).map((r) => r.streamId),
+    onReorder: (ids) => { if (scope) void saveOrder(profile, sid, scope, ids); },
+  });
+  const resetNow = async () => { if (scope) { await resetOrder(profile, sid, scope); useUi.getState().toast(t("cor.resetDone")); } };
+
+  const move = (dir: number) => {
+    if (!count) return;
+    const curIdx = (() => { for (let i = 0; i < count; i++) if (rows.get(i)?.id === selId) return i; return -1; })();
+    let i = curIdx < 0 ? (dir > 0 ? -1 : count) : curIdx;
+    for (let n = 0; n < 400; n++) {
+      i += dir;
+      if (i < 0 || i >= count) return;
+      const r = rows.get(i);
+      if (r === undefined) { rows.want(i, i + 40); return; }
+      if (!r.sep) { setSelId(r.id!); list.current?.scrollTo(i); return; }
+    }
+  };
+  const onKey = (e: React.KeyboardEvent) => {
+    if (mv) {
+      const step: Record<string, number> = { ArrowUp: -1, ArrowDown: 1, PageUp: -8, PageDown: 8, Home: -mv.ids.length, End: mv.ids.length };
+      if (e.key in step) stepTo(step[e.key]!);
+      else if (e.key === "Enter") void endMove(true);
+      else if (e.key === "Escape") void endMove(false);
+      else return;
+      e.preventDefault(); e.stopPropagation();
+      return;
+    }
+    if ((e.key === "m" || e.key === "M") && !e.ctrlKey && !e.metaKey && !e.altKey && canReorder) { e.preventDefault(); e.stopPropagation(); void beginMove(); return; }
+    if (e.key === "ArrowDown") { e.preventDefault(); move(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); move(-1); }
+    else if (e.key === "PageDown") { e.preventDefault(); for (let i = 0; i < 8; i++) move(1); }
+    else if (e.key === "PageUp") { e.preventDefault(); for (let i = 0; i < 8; i++) move(-1); }
+    else if (e.key === "Enter" && selected) { e.preventDefault(); if (playing === selected.streamId) usePlayer.getState().setMode("full"); else play(selected); }
+  };
+
+  const catLabel = cat === FAV ? t("common.favorites") : cat === "" ? t("common.all") : cats?.find((c) => c.extId === cat)?.label ?? "";
+  const extra = useMemo(() => [{ id: FAV, label: t("common.favorites"), n: favs.length }, { id: "", label: t("common.all"), n: source.counts.live }], [favs.length, source.counts.live, t]);
+  const pickCat = (c: string) => { setCat(c); setPop(false); };
+  const sections = useLiveQuery(async () => (arrayMode ? 0 : await colOf(cat || null).filter((c) => !!c.sep).count()), [source.cid, cat, arrayMode, colOf]) ?? 0;
+
+  if (source.state === "syncing" && !source.cid) return <StateCard icon="refresh" title={t("sync.title")} body={t("sync.lead")} />;
+
+  return (
+    <div ref={root} className={`split${wide ? " wide" : ""}`}>
+      {wide && (
+        <section className="col" aria-label={t("common.categories")} style={{ paddingTop: "1.5rem" }}>
+          <div className="col-head" style={{ paddingTop: 0 }}><h1 style={{ fontSize: "1.25rem" }}>{t("nav.live")}</h1></div>
+          <CategoryList cats={cats ?? []} value={cat} onPick={pickCat} extra={extra} />
+        </section>
+      )}
+      <section className="col" aria-label={t("nav.live")}>
+        <div className="col-head">
+          <div className="top">
+            {!wide && <h1>{t("nav.live")}</h1>}
+            {wide && <h1 className="ellipsis" style={{ fontSize: "1.5rem" }}>{catLabel}</h1>}
+          </div>
+          {!wide && (
+            <HScroll wheel follow={cat} className="chips scroll" role="tablist" aria-label={t("common.categories")}>
+              <button className="chip" role="tab" aria-selected={cat === FAV} onClick={() => pickCat(FAV)}>{t("common.favorites")}</button>
+              <button className="chip" role="tab" aria-selected={cat === ""} onClick={() => pickCat("")}>{t("common.all")}</button>
+              {cat !== "" && cat !== FAV && <button className="chip" role="tab" aria-selected>{catLabel}</button>}
+              <button className="chip" onClick={() => setPop(true)}>{t("common.categories")} ▾</button>
+            </HScroll>
+          )}
+          <div className="search-box">
+            <Icon name="search" size={16} />
+            <input className="input" disabled={!!mv} placeholder={t("live.filterChannels")} value={filter} onChange={(e) => setFilter(e.target.value)} aria-label={t("live.filterChannels")} />
+          </div>
+          <div className="muted" style={{ fontSize: "0.8125rem", fontWeight: 600 }}>
+            {count == null ? t("common.loading") : `${catLabel || t("common.all")} · ${t("common.channelsCount", { count: count - sections })}${sections ? " · " + t("common.sections", { count: sections }) : ""}`}
+          </div>
+        </div>
+        {mv && (
+          <div className="move-bar" role="group" aria-label={t("cor.title")}>
+            <span className="ellipsis">{t("cor.hint")}</span>
+            <button className="btn" onClick={() => stepTo(-1)} aria-label={t("cor.up")}>↑</button>
+            <button className="btn" onClick={() => stepTo(1)} aria-label={t("cor.down")}>↓</button>
+            <button className="btn primary" onClick={() => void endMove(true)}>{t("cor.done")}</button>
+            <button className="btn" onClick={() => void endMove(false)}>{t("cor.cancel")}</button>
+          </div>
+        )}
+        {count === 0 ? <div className="state-card"><p>{t("live.noChannels")}</p></div> : (
+          <VList
+            ref={list} rows={rows} rowH={66} label={t("nav.live")} onKeyDown={onKey}
+            render={(c) => c ? <ChanRow c={c} source={source} sel={c.id === selId} playing={c.streamId === playing} onPick={() => pick(c)} extra={c.sep ? undefined : dnd.props(c.streamId)} extraCls={dnd.cls(c.streamId)} onMenu={scope && !c.sep && !mv ? () => { setSelId(c.id!); void beginMove(c); } : undefined} /> : <div className="skeleton" style={{ height: 58 }} />}
+          />
+        )}
+      </section>
+      <section className="preview" aria-label={t("a11y.preview")}>
+        <PreviewSlot>{t("live.preview")}</PreviewSlot>
+        {selected && (
+          <>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", fontSize: "0.75rem", fontWeight: 800, letterSpacing: "0.1em" }}>
+              <span className="badge-live">{t("common.live")}</span>
+              <span style={{ color: "var(--text-2)", letterSpacing: 0 }}>{nn.now ? `${hhmm(nn.now.start)} – ${hhmm(nn.now.end)}` : `${selected.num} · ${selected.display}`}</span>
+            </div>
+            <h2>{nn.now?.title || selected.display}</h2>
+            {nn.now && (
+              <div className="progress" style={{ height: 8 }}><i style={{ width: `${Math.min(100, Math.max(0, ((Date.now() - nn.now.start) / (nn.now.end - nn.now.start)) * 100))}%` }} /></div>
+            )}
+            {nn.now?.desc ? <ProgramDesc text={nn.now.desc} /> : !nn.now && <p className="desc muted">{t("common.noProgram")}</p>}
+            {nn.next && (
+              <div className="next">
+                <div className="eyebrow">{t("common.upNext")}</div>
+                <div className="r"><span className="ellipsis">{hhmm(nn.next.start)} · {nn.next.title}</span><span className="muted">{Math.round((nn.next.end - nn.next.start) / 60000)} min</span></div>
+              </div>
+            )}
+            <div className="actions">
+              <button className="btn primary" onClick={() => play(selected, true)}><Icon name="play" size={18} fill />{t("common.watch")}</button>
+              <button className="btn" onClick={async () => {
+                const on = await toggleFavorite({ profile: prefs.profileId, sourceId: source.id!, kind: "live", refId: selected.streamId, name: selected.display, image: selected.logo });
+                useUi.getState().toast(t(on ? "toast.favAdded" : "toast.favRemoved"));
+              }} aria-pressed={isFav}><Icon name="heart" size={18} fill={isFav} />{t(isFav ? "common.removeFav" : "common.addFav")}</button>
+              {canReorder && !mv && <button className="btn" onClick={() => void beginMove()} title="M"><Icon name="list" size={18} />{t("cor.move")}</button>}
+              {scope && !mv && order && <button className="btn" onClick={() => void resetNow()}>{t("cor.reset")}</button>}
+            </div>
+            <div className="muted" style={{ fontSize: "0.8125rem" }}>{t("live.previewHint")}</div>
+          </>
+        )}
+      </section>
+      {pop && (
+        <div className="scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) setPop(false); }}>
+          <div className="modal" style={{ height: "min(36rem, 80vh)", padding: "1.25rem 0.5rem 1rem" }} role="dialog" aria-label={t("common.categories")}>
+            <h3 style={{ padding: "0 1rem" }}>{t("common.categories")}</h3>
+            <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+              <CategoryList cats={cats ?? []} value={cat} onPick={pickCat} extra={extra} />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Description du programme : 4 lignes, « Voir plus » pour la lire en entier (repliée à chaque changement de programme). */
+function ProgramDesc({ text }: { text: string }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  useEffect(() => setOpen(false), [text]);
+  return (
+    <>
+      <p className={open ? "desc" : "desc clamp-4"}>{text}</p>
+      {text.length > 180 && <button className="more" onClick={() => setOpen((o) => !o)}>{t(open ? "common.showLess" : "common.showMore")}</button>}
+    </>
+  );
+}

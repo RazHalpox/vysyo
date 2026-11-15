@@ -1,0 +1,201 @@
+package com.ultratv.tv.nativeapp.ui.mobile
+
+import com.ultratv.tv.nativeapp.nav.Routes
+import com.ultratv.tv.nativeapp.ui.player.engine.AspectMode
+
+/**
+ * Logique PURE du mode tactile (aucune dépendance Android) : testée à part, partagée par les écrans.
+ * La TV ne passe jamais par ici : [navLayoutFor] renvoie [NavLayout.TV_RAIL] dès que l'appareil est une télévision.
+ */
+
+/** Disposition de navigation : rail D-pad (TV), barre d'onglets (compact), rail latéral tactile (medium / expanded). */
+enum class NavLayout { TV_RAIL, BOTTOM_TABS, SIDE_RAIL }
+
+/** Classes de taille de fenêtre (seuils Material 3 : 600 dp et 840 dp). */
+enum class WindowClass { COMPACT, MEDIUM, EXPANDED }
+
+const val MEDIUM_MIN_DP = 600f
+const val EXPANDED_MIN_DP = 840f
+/** Sous cette hauteur (téléphone en paysage), le rail latéral n'aurait pas la place de ses entrées. */
+const val COMPACT_HEIGHT_DP = 480f
+
+fun windowClassFor(widthDp: Float): WindowClass = when {
+    widthDp < MEDIUM_MIN_DP -> WindowClass.COMPACT
+    widthDp < EXPANDED_MIN_DP -> WindowClass.MEDIUM
+    else -> WindowClass.EXPANDED
+}
+
+fun navLayoutFor(tv: Boolean, widthDp: Float, heightDp: Float): NavLayout = when {
+    tv -> NavLayout.TV_RAIL
+    windowClassFor(widthDp) == WindowClass.COMPACT || heightDp < COMPACT_HEIGHT_DP -> NavLayout.BOTTOM_TABS
+    else -> NavLayout.SIDE_RAIL
+}
+
+/** Onglets de la barre du bas (maquette MobileTabs) : Accueil, Direct, Guide, Films, Plus. */
+enum class MobileTab { HOME, LIVE, GUIDE, MOVIES, MORE }
+
+/** Destinations ouvertes par « Plus ». */
+val MORE_ROUTES = listOf(Routes.SPORT, Routes.SERIES, Routes.FAVORITES, "recordings", Routes.DOWNLOADS, Routes.SETTINGS, "profiles")
+
+fun tabForRoute(route: String?): MobileTab = when {
+    route == null || route == Routes.HOME -> MobileTab.HOME
+    route == Routes.LIVE || route == Routes.SIMPLE_CHANNELS || route.startsWith("player") -> MobileTab.LIVE
+    route == Routes.GUIDE -> MobileTab.GUIDE
+    route == Routes.MOVIES || route.startsWith("movies/") -> MobileTab.MOVIES
+    else -> MobileTab.MORE
+}
+
+// ───────────────────────── Barre du bas personnalisable ─────────────────────────
+
+/** Rubriques possibles au milieu de la barre du bas (entre Accueil et Plus), dans l'ordre du choix. */
+val BOTTOM_TAB_CHOICES = listOf(Routes.LIVE, Routes.GUIDE, Routes.MOVIES, Routes.SERIES, Routes.SPORT, Routes.FAVORITES, "recordings", Routes.DOWNLOADS)
+
+/** Barre d'origine : Direct, Guide, Films. */
+val DEFAULT_BOTTOM_TABS = listOf(Routes.LIVE, Routes.GUIDE, Routes.MOVIES)
+
+/** Nombre de rubriques choisies (Accueil et Plus sont fixes). */
+const val BOTTOM_TAB_SLOTS = 3
+
+/**
+ * Rubriques de la barre du bas d'après le réglage enregistré (« live,guide,series ») : valeurs inconnues, doublons et Sport
+ * masqué ignorés, complété avec les rubriques d'origine pour en avoir toujours [BOTTOM_TAB_SLOTS].
+ */
+fun bottomTabRoutes(saved: String?, sportOn: Boolean): List<String> {
+    val allowed = BOTTOM_TAB_CHOICES.filter { sportOn || it != Routes.SPORT }
+    val out = saved.orEmpty().split(',').map { it.trim() }.filter { it in allowed }.distinct().take(BOTTOM_TAB_SLOTS).toMutableList()
+    for (d in DEFAULT_BOTTOM_TABS + allowed) if (out.size < BOTTOM_TAB_SLOTS && d !in out) out += d
+    return out
+}
+
+/** Place [route] à la position [slot] ; déjà présente ailleurs, les deux rubriques échangent leur place. */
+fun withBottomTab(tabs: List<String>, slot: Int, route: String): List<String> {
+    if (slot !in tabs.indices) return tabs
+    val out = tabs.toMutableList()
+    val at = out.indexOf(route)
+    if (at >= 0) out[at] = out[slot]
+    out[slot] = route
+    return out
+}
+
+/** Déplace le raccourci [slot] de [delta] places (▲ = -1, ▼ = +1) ; sans effet en bout de liste. */
+fun moveBottomTab(tabs: List<String>, slot: Int, delta: Int): List<String> {
+    val to = slot + delta
+    if (slot !in tabs.indices || to !in tabs.indices) return tabs
+    val out = tabs.toMutableList()
+    out[slot] = tabs[to]; out[to] = tabs[slot]
+    return out
+}
+
+/** Rubrique d'origine d'une route (fiche film → Films, lecteur → Direct…). */
+fun bottomTabRootOf(route: String?): String = when {
+    route == null -> Routes.HOME
+    route == Routes.SIMPLE_CHANNELS || route.startsWith("player") -> Routes.LIVE
+    route.startsWith("movies/") -> Routes.MOVIES
+    route.startsWith("series/") -> Routes.SERIES
+    else -> route
+}
+
+/** Onglet actif : Accueil, l'une des rubriques choisies, sinon null (= « Plus »). */
+fun activeBottomTab(route: String?, tabs: List<String>): String? {
+    val root = bottomTabRootOf(route)
+    return when {
+        root == Routes.HOME -> Routes.HOME
+        root in tabs -> root
+        else -> null
+    }
+}
+
+/** Contenu de « Plus » : les rubriques non retenues dans la barre, puis Réglages et Profils. */
+fun moreRoutesFor(tabs: List<String>, sportOn: Boolean): List<String> =
+    BOTTOM_TAB_CHOICES.filter { it !in tabs && (sportOn || it != Routes.SPORT) } + listOf(Routes.SETTINGS, "profiles")
+
+/** Le lecteur est plein écran : ni barre d'onglets, ni rail. */
+fun isFullscreenRoute(route: String?): Boolean = route?.startsWith("player") == true
+
+/** Entrée du rail latéral tactile : la route la plus proche porte l'état actif. */
+fun railRouteFor(route: String?): String = when {
+    route == null -> Routes.HOME
+    route.startsWith("player") || route == Routes.SIMPLE_CHANNELS -> Routes.LIVE
+    route.startsWith("movies/") -> Routes.MOVIES
+    route.startsWith("series/") -> Routes.SERIES
+    route == "categories" || route == "diagnostic" || route == "locked-channels" -> Routes.SETTINGS
+    else -> route
+}
+
+/** Nombre de colonnes d'une grille d'affiches : au moins 2, cellules d'environ [minCellDp]. */
+fun gridColumns(widthDp: Float, minCellDp: Float = 120f, gutterDp: Float = 12f): Int =
+    ((widthDp + gutterDp) / (minCellDp + gutterDp)).toInt().coerceAtLeast(2)
+
+/** Tablette en largeur : liste + détail côte à côte (Direct, fiches). */
+fun usesTwoPane(widthDp: Float): Boolean = widthDp >= EXPANDED_MIN_DP
+
+// ───────────────────────── Gestes du lecteur ─────────────────────────
+
+enum class TapZone { LEFT, CENTER, RIGHT }
+
+/** Tiers gauche / centre / droit de l'écran (double appui : −10 s / +10 s sur les côtés). */
+fun tapZone(x: Float, width: Float): TapZone {
+    if (width <= 0f) return TapZone.CENTER
+    val f = x / width
+    return when { f < 1f / 3f -> TapZone.LEFT; f > 2f / 3f -> TapZone.RIGHT; else -> TapZone.CENTER }
+}
+
+const val SEEK_STEP_MS = 10_000L
+
+/** Saut du double appui : seulement en VOD (le direct n'a pas de position), jamais au centre. */
+fun doubleTapSeekMs(zone: TapZone, isLive: Boolean): Long? = when {
+    isLive -> null
+    zone == TapZone.LEFT -> -SEEK_STEP_MS
+    zone == TapZone.RIGHT -> SEEK_STEP_MS
+    else -> null
+}
+
+/** Nouvelle position après un saut, bornée à [0 ; durée] quand celle-ci est connue. */
+fun seekTarget(positionMs: Long, deltaMs: Long, durationMs: Long): Long {
+    val t = (positionMs + deltaMs).coerceAtLeast(0L)
+    return if (durationMs > 0) t.coerceAtMost(durationMs) else t
+}
+
+enum class DragRole { BRIGHTNESS, VOLUME, ZAP, NONE }
+
+/**
+ * Rôle d'un glissement vertical selon le point de départ : tiers gauche = luminosité, tiers droit = volume ;
+ * au centre, en direct, un balayage change de chaîne (en VOD le centre ne fait rien).
+ */
+fun dragRole(startX: Float, width: Float, isLive: Boolean): DragRole = when (tapZone(startX, width)) {
+    TapZone.LEFT -> DragRole.BRIGHTNESS
+    TapZone.RIGHT -> DragRole.VOLUME
+    TapZone.CENTER -> if (isLive) DragRole.ZAP else DragRole.NONE
+}
+
+/**
+ * Niveau (0..1) après un glissement vertical : glisser vers le HAUT augmente. Un balayage de toute
+ * la hauteur couvre toute la plage ([sensitivity] = 1).
+ */
+fun levelAfterDrag(start: Float, totalDy: Float, heightPx: Float, sensitivity: Float = 1f): Float {
+    if (heightPx <= 0f) return start.coerceIn(0f, 1f)
+    return (start - totalDy / heightPx * sensitivity).coerceIn(0f, 1f)
+}
+
+/** Zapping par balayage : vers le haut = chaîne suivante, vers le bas = précédente ; en dessous du seuil, rien. */
+fun zapFor(totalDy: Float, thresholdPx: Float): Int? = when {
+    totalDy <= -thresholdPx -> +1
+    totalDy >= thresholdPx -> -1
+    else -> null
+}
+
+private val PINCH_CYCLE = listOf(AspectMode.FIT, AspectMode.FILL, AspectMode.ZOOM)
+
+/** Pincer pour agrandir passe à FILL puis ZOOM ; pincer pour réduire revient d'un cran. Les formats forcés (16:9, 4:3) repartent de FIT. */
+fun aspectAfterPinch(current: AspectMode, scale: Float): AspectMode {
+    val i = PINCH_CYCLE.indexOf(current).let { if (it < 0) 0 else it }
+    return when {
+        scale >= 1.12f -> PINCH_CYCLE[(i + 1).coerceAtMost(PINCH_CYCLE.lastIndex)]
+        scale <= 0.88f -> PINCH_CYCLE[(i - 1).coerceAtLeast(0)]
+        else -> current
+    }
+}
+
+/** Image dans l'image : seulement pendant une lecture, et pas sur un écran qui n'a aucun flux. */
+fun shouldEnterPip(hasPlayback: Boolean, playerShown: Boolean): Boolean = hasPlayback && playerShown
+

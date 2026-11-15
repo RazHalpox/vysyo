@@ -1,0 +1,165 @@
+name: Compiler Vysyo
+
+# À chaque envoi sur main : APK Android TV + installeur Windows, publiés dans les Releases.
+# La version vient du fichier VERSION (x.y.z) : l'augmenter pour que les applis proposent la mise à jour.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: APK Android TV
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: android-native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Installer le NDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.1.12297006" > /dev/null
+      - name: Compiler l'APK (signé avec la clé fixe de Vysyo)
+        env:
+          ULTRA_KEYSTORE: ${{ github.workspace }}/android-native/signing/vysyo.keystore
+          ULTRA_KEYSTORE_PASSWORD: vysyo-release
+          ULTRA_KEY_ALIAS: vysyo
+          ULTRA_KEY_PASSWORD: vysyo-release
+        run: |
+          chmod +x gradlew
+          set -o pipefail
+          ./gradlew assembleRelease --console=plain 2>&1 | tee build.log
+      - name: Afficher l'erreur
+        if: failure()
+        run: grep -E "^e: |error:|FAILURE|What went wrong" -A3 build.log | head -40 | sed 's/^/::error::/'
+      - name: Vérifier la signature
+        run: |
+          SIGNER=$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name apksigner | sort -V | tail -1)
+          for f in app/build/outputs/apk/release/*-release.apk; do
+            CERTS=$("$SIGNER" verify --print-certs "$f")
+            echo "$f"; echo "$CERTS" | grep -E "DN|SHA-256"
+            echo "$CERTS" | grep -q "CN=Vysyo" || { echo "::error::$f n'est pas signé avec la clé Vysyo"; exit 1; }
+          done
+      - name: Préparer les fichiers
+        working-directory: ${{ github.workspace }}
+        run: |
+          V=$(cat VERSION)
+          OUT=android-native/app/build/outputs/apk/release
+          mkdir -p dist
+          UNI=$(ls "$OUT"/*universal*-release.apk 2>/dev/null | head -1)
+          [ -z "$UNI" ] && UNI="$OUT/app-release.apk"
+          cp "$UNI" dist/Vysyo.apk
+          cp "$UNI" dist/Vysyo-debug.apk
+          (cd dist && sha256sum Vysyo-debug.apk > Vysyo-debug.apk.sha256)
+          for abi in armeabi-v7a arm64-v8a; do
+            f=$(ls "$OUT"/*-"$abi"-release.apk 2>/dev/null | head -1)
+            [ -n "$f" ] && cp "$f" "dist/Vysyo-$V-$abi.apk"
+          done
+          (cd dist && sha256sum Vysyo-*-*.apk > SHA256SUMS.txt || true)
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/
+
+  ffmpeg:
+    name: ffmpeg LGPL (Windows)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Outils
+        run: |
+          for i in 1 2 3; do
+            sudo apt-get update -q && sudo apt-get install -y -q nasm libssl-dev gcc-mingw-w64-x86-64 && exit 0
+            sleep 20
+          done
+          exit 1
+      - name: Compiler
+        working-directory: electron
+        run: bash scripts/build-ffmpeg-min.sh win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-win
+          if-no-files-found: error
+          path: electron/vendor/ffmpeg/
+
+  windows:
+    name: Installeur Windows
+    needs: ffmpeg
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Appli web
+        working-directory: web
+        run: npm ci && npm run build
+      - name: Bureau - dépendances
+        working-directory: electron
+        run: |
+          npm ci
+          npm version "$(cat ../VERSION)" --no-git-tag-version --allow-same-version
+          npm run prepare:web
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-win
+          path: electron/vendor/ffmpeg
+      - name: Installeur
+        working-directory: electron
+        run: npx electron-builder --win nsis --x64 --publish never
+      - name: Préparer les fichiers
+        run: |
+          mkdir -p dist
+          cp electron/release/*.exe electron/release/*.blockmap electron/release/latest.yml dist/
+          cp electron/release/*.exe dist/Vysyo-Setup.exe
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/
+
+  publier:
+    name: Publier
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: android
+          path: out/android
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows
+          path: out/windows
+      - name: Releases GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(cat VERSION)
+          NOTES="Version $V. Box Android TV : Vysyo.apk. Windows : Vysyo-Setup.exe."
+          # Bureau d'abord (tag desktop-v…, lu par la mise à jour Windows), puis Android en « Latest ».
+          gh release delete "desktop-v$V" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "desktop-v$V" out/windows/* --title "Vysyo $V (Windows)" --notes "$NOTES" --latest=false
+          gh release delete "v$V" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "v$V" out/android/* out/windows/Vysyo-Setup.exe --title "Vysyo $V" --notes "$NOTES" --latest

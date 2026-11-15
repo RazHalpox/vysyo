@@ -1,0 +1,151 @@
+/* =====================================================================
+   Design v2 (maquettes TV adaptées au bureau), chargé après app.css.
+   Le survol à la souris et le focus clavier partagent le même rendu :
+   fond « focus » plein (--sel-bg) + texte inversé (--sel-ink).
+   Aucun flou d'arrière-plan, transitions courtes (coupées par prefers-reduced-motion).
+   ===================================================================== */
+:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+.rail { border-inline-end: 0; }
+.rail-item .pill { border-radius: 1.125rem; }
+.rail-item:hover .pill, .rail-item:focus-visible .pill { background: var(--sel-bg); color: var(--sel-ink); }
+.rail-item.active .pill { background: var(--sel-bg); color: var(--sel-ink); }
+.rail-item:focus-visible, .rail .rail-search:focus-visible { outline-offset: 0; }
+.rail .rail-search, .rail .rail-search.active { background: var(--surface-2); color: var(--text); }
+.rail .rail-search:hover, .rail .rail-search:focus-visible, .rail .rail-search.active { background: var(--sel-bg); color: var(--sel-ink); }
+.rail .logo { border-radius: 1rem; }
+
+/* Boutons et pastilles : forme pilule, survol = focus. */
+.btn:hover, .btn:focus-visible, .chip:hover, .chip:focus-visible { background: var(--sel-bg); color: var(--sel-ink); }
+.btn.primary:hover, .btn.primary:focus-visible { filter: none; background: var(--text-2); color: var(--bg); }
+.btn.accent:hover, .btn.accent:focus-visible { background: var(--accent); color: var(--on-accent); box-shadow: 0 0 0 3px var(--sel-bg); }
+.btn.danger:hover { color: var(--sel-ink); }
+.chip { background: var(--surface); }
+.chip[aria-selected="true"], .chip.on { background: var(--sel-bg); color: var(--sel-ink); }
+.badge-live { border-radius: 999px; padding: 0.25rem 0.75rem; }
+.seg { background: var(--surface); }
+.seg button[aria-checked="true"] { background: var(--sel-bg); color: var(--sel-ink); }
+.seg button:hover:not([aria-checked="true"]), .seg button:focus-visible:not([aria-checked="true"]) { background: var(--sel-bg); color: var(--sel-ink); }
+.input, .search-box .input { background: var(--surface-2); }
+
+/* Cartes et panneaux : grands rayons. */
+.hero { border-radius: 2rem; background: var(--surface); }
+.chan-card, .pref, .src-card, .acc-card, .lang-tile, .step-item { border-radius: 1.375rem; }
+.choice, .form-card { border-radius: 1.75rem; }
+.thumb-card .t, .poster .p, .preview-slot { border-radius: 1.25rem; }
+.chan-card { background: var(--surface); }
+.chan-card:hover, .chan-card:focus-visible { background: var(--sel-bg); color: var(--sel-ink); }
+.chan-card:hover span, .chan-card:focus-visible span { color: var(--sel-sub); }
+.thumb-card:focus-visible { outline: none; }
+.thumb-card:hover .t, .thumb-card:focus-visible .t { transform: scale(1.02); box-shadow: 0 0 0 3px var(--sel-bg); }
+.poster:hover .p, .poster:focus-visible .p { box-shadow: 0 0 0 3px var(--sel-bg), var(--shadow); }
+.episode { border-radius: 1.25rem; }
+.episode:hover, .episode:focus-visible { background: var(--sel-bg); color: var(--sel-ink); }
+.episode:hover .m, .episode:hover .p, .episode:focus-visible .m, .episode:focus-visible .p { color: var(--sel-sub); }
+.popover { border-radius: 1.375rem; background: var(--surface); }
+
+/* Liste de chaînes : survol = focus, en cours = teinte « maintenant ». */
+.chan-row { border-radius: 1.125rem; background: transparent; }
+.chan-row:hover, .chan-row:focus-visible, .chan-row.sel { background: var(--sel-bg); color: var(--sel-ink); }
+.chan-row:hover .num, .chan-row:hover .sub, .chan-row:focus-visible .num, .chan-row:focus-visible .sub { color: var(--sel-sub); }
+.chan-row:hover .logo, .chan-row:focus-visible .logo { background: var(--sel-logo); }
+.chan-row:hover .qbadge, .chan-row:focus-visible .qbadge { color: var(--sel-ink); }
+.chan-row.playing:not(.sel) { background: var(--now-tint); }
+.chan-row.playing:not(.sel):hover, .chan-row.playing:not(.sel):focus-visible { background: var(--sel-bg); }
+.chan-row .logo { border-radius: 0.5rem; }
+.cat-item, .nav-item { border-radius: 1rem; }
+.cat-item:hover, .cat-item:focus-visible, .nav-item:hover, .nav-item:focus-visible { background: var(--sel-bg); color: var(--sel-ink); }
+.cat-item:hover .n, .cat-item:focus-visible .n { color: var(--sel-sub); }
+.cat-item.on, .nav-item.on { background: var(--sel-bg); color: var(--sel-ink); box-shadow: none; }
+.cat-item.on .n { color: var(--sel-sub); }
+[dir="rtl"] .cat-item.on, [dir="rtl"] .nav-item.on { box-shadow: none; }
+
+/* Guide : programme en cours teinté, sélection = focus. */
+.g-prog { border-radius: 1rem; }
+.g-prog.now { background: var(--now-tint); color: var(--text); }
+.g-prog:hover, .g-prog:focus-visible, .g-prog.sel { background: var(--sel-bg); color: var(--sel-ink); }
+.g-prog.sel { box-shadow: 0 0 0 3px var(--accent); }
+.guide-grid { border-top: 0; }
+
+/* Réglages et onboarding. */
+.src-card.active .ico, .choice.first .ico, .lang-tile[aria-checked="true"] .code, .step-item.active .ic, .steps li.on .dot { background: var(--accent); color: var(--on-accent); }
+.choice:hover, .choice:focus-visible, .lang-tile:hover, .lang-tile:focus-visible { background: var(--sel-bg); color: var(--sel-ink); }
+.choice:hover span.s, .lang-tile:hover .n, .choice:focus-visible span.s, .lang-tile:focus-visible .n { color: var(--sel-sub); }
+.profile:hover .av, .profile:focus-visible .av { box-shadow: 0 0 0 4px var(--bg), 0 0 0 7px var(--sel-bg); }
+.brand span span { color: var(--accent-text); }
+.cast button.c:hover, .cast button.c:focus-visible { background: var(--sel-bg); color: var(--sel-ink); }
+
+/* Lecteurs : toujours sombres, quel que soit le thème. */
+.player { color-scheme: dark; }
+.player .pbtn:hover, .player .pbtn:focus-visible, .player .popt:hover, .player .popt:focus-visible { background: #F4F5F7; color: #0A0C10; }
+.player .pside .tabs button:hover, .player .pside .opt:hover, .player .precent-ch:hover { background: #2A3140; }
+.pside .opt[aria-checked="true"] { box-shadow: inset 0 0 0 2px #FF3B47; }
+
+/* Démarrage : logo en fondu avec léger zoom, éclat du « play », sortie vers l'accueil (700 ms, ne retarde jamais le chargement). */
+.splash { position: fixed; inset: 0; z-index: 200; background: #0A0C10; display: flex; align-items: center; justify-content: center; pointer-events: none; animation: splash-out 0.7s linear forwards; }
+.splash .sq { width: 9.5rem; height: 9.5rem; border-radius: 2.75rem; background: #1A1E27; display: flex; align-items: center; justify-content: center; animation: splash-sq 0.7s ease-out forwards; }
+.splash svg { width: 5.5rem; height: 5.5rem; animation: splash-tri 0.7s ease-out forwards; }
+@keyframes splash-sq { 0% { opacity: 0; transform: scale(0.92); box-shadow: 0 0 0 0 rgba(255, 59, 71, 0); } 35% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 rgba(255, 59, 71, 0.18); } 70% { opacity: 1; box-shadow: 0 0 0 1.1rem rgba(255, 59, 71, 0.18); } 100% { opacity: 0.3; box-shadow: 0 0 0 1.4rem rgba(255, 59, 71, 0); } }
+@keyframes splash-tri { 0%, 30% { fill: #7A2026; } 36%, 100% { fill: #FF3B47; } }
+@keyframes splash-out { 0%, 70% { opacity: 1; } 100% { opacity: 0; visibility: hidden; } }
+@keyframes splash-fade { from { opacity: 1; } to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .splash, .splash .sq, .splash svg { animation-duration: 0.2s !important; } .splash .sq { animation-name: splash-fade; } }
+
+/* ---------- Barre latérale : groupes, version large (maquette « Menu latéral ») ---------- */
+.rail-head { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; }
+.rail-brand, .rail-long, .rail-kbd, .rail-sync-wide { display: none; }
+.rail-toggle { width: 2rem; height: 2rem; border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
+.rail-toggle:hover, .rail-toggle:focus-visible { background: var(--surface-2); color: var(--text); }
+.rail-group { width: 2rem; height: 2px; border-radius: 1px; background: var(--line); margin: 0.375rem auto; flex: none; }
+.rail-group span { display: none; }
+.rail-sync { display: flex; align-items: center; justify-content: center; }
+.rail-ring { width: 2.5rem; height: 2.5rem; border-radius: 50%; display: grid; place-items: center; background: conic-gradient(var(--accent) 0 var(--p), var(--surface-3) var(--p) 100%); }
+.rail-ring > span { width: 2rem; height: 2rem; border-radius: 50%; display: grid; place-items: center; background: var(--rail); font-size: 0.6875rem; font-weight: 800; color: var(--text-2); }
+.rail-profile { display: flex; align-items: center; justify-content: center; padding: 0; border-radius: 0.875rem; }
+.rail-profile:hover .avatar, .rail-profile:focus-visible .avatar { outline: 2px solid var(--line); outline-offset: 2px; }
+
+@media (min-width: 1100px) {
+  html.rail-wide { --rail-w: 15.5rem; }
+  html.rail-wide .rail { align-items: stretch; padding-inline: 0.875rem; padding-bottom: 1rem; gap: 0.5rem; }
+  html.rail-wide .rail-head { flex-direction: row; gap: 0.75rem; padding-inline: 0.375rem; margin-bottom: 0.5rem; }
+  html.rail-wide .rail .logo { width: 36px; height: 36px; }
+  html.rail-wide .rail-brand { display: block; font-family: var(--font-title); font-weight: 700; font-size: 1.0625rem; letter-spacing: 0.06rem; color: var(--text); white-space: nowrap; }
+  html.rail-wide .rail-brand span { color: var(--text-3); font-weight: 600; }
+  html.rail-wide .rail-toggle { margin-inline-start: auto; }
+  html.rail-wide .rail .rail-search { width: auto; height: 2.5rem; border-radius: 0.75rem; justify-content: flex-start; gap: 0.5rem; padding: 0 0.75rem; margin-top: 0; color: var(--text-3); font-size: 0.9375rem; font-weight: 600; }
+  html.rail-wide .rail .rail-search .rail-long { display: block; flex: 1; }
+  html.rail-wide .rail-kbd { display: inline-block; font-size: 0.75rem; font-weight: 700; line-height: 1; color: var(--text-3); border: 1px solid var(--line); border-radius: 0.375rem; padding: 0.1875rem 0.375rem; }
+  html.rail-wide .rail nav { gap: 2px; padding-top: 0; }
+  html.rail-wide .rail-group { width: auto; height: auto; background: none; margin: 0; }
+  html.rail-wide .rail-group span { display: block; font-size: 0.6875rem; font-weight: 800; letter-spacing: 0.09rem; text-transform: uppercase; color: var(--text-3); padding: 0.875rem 0.75rem 0.25rem; }
+  html.rail-wide .rail-item { width: auto; max-width: none; height: 2.5rem; flex-direction: row; align-items: center; gap: 0.75rem; padding: 0 0.75rem; border-radius: 0.75rem; font-size: 0.9375rem; font-weight: 600; color: var(--text-2); position: relative; overflow: visible; flex: none; }
+  html.rail-wide .rail .rail-item .pill { width: auto; height: auto; background: none; color: var(--text-3); }
+  html.rail-wide .rail-short { display: none; }
+  html.rail-wide .rail-item .rail-long { display: block; overflow: hidden; text-overflow: ellipsis; }
+  html.rail-wide .rail-item:hover, html.rail-wide .rail-item:focus-visible { background: var(--surface-2); color: var(--text); }
+  html.rail-wide .rail .rail-item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); }
+  html.rail-wide .rail .rail-item.active .pill { background: none; color: var(--accent-text, var(--accent)); }
+  html.rail-wide .rail-item.active::before { content: ""; position: absolute; inset-inline-start: 0; top: 0.625rem; width: 3px; height: 1.25rem; border-radius: 2px; background: var(--accent); }
+  html.rail-wide .rail-foot { align-items: stretch; gap: 2px; }
+  html.rail-wide .rail-sync { display: block; padding: 0.5rem 0.75rem; }
+  html.rail-wide .rail-ring { display: none; }
+  html.rail-wide .rail-sync-wide { display: flex; flex-direction: column; gap: 0.375rem; }
+  html.rail-wide .rail-sync-row { display: flex; justify-content: space-between; font-size: 0.8125rem; font-weight: 700; color: var(--text-2); }
+  html.rail-wide .rail-bar { display: block; height: 4px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
+  html.rail-wide .rail-bar > span { display: block; height: 4px; background: var(--accent); }
+  html.rail-wide .rail-profile { justify-content: flex-start; gap: 0.75rem; padding: 0.5rem; margin-top: 0.5rem; border-top: 1px solid var(--line); border-radius: 0 0 0.875rem 0.875rem; text-align: start; }
+  html.rail-wide .rail-profile:hover { background: var(--surface-2); }
+  html.rail-wide .rail-profile-tx { display: flex; flex-direction: column; min-width: 0; }
+  html.rail-wide .rail-profile-tx .nm { font-size: 0.9375rem; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  html.rail-wide .rail-profile-tx .sb { font-size: 0.8125rem; color: var(--text-3); white-space: nowrap; }
+}
+
+/* Repères de la barre latérale : enregistrement en cours (pastille sur l'icône), nombres dans la barre large. */
+.rail-item { position: relative; }
+.rail-item.rail-rec .pill { position: relative; }
+.rail-item.rail-rec .pill::after { content: ""; position: absolute; top: 3px; inset-inline-end: 9px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--rail); }
+.rail-badge { display: none; }
+@media (min-width: 1100px) {
+  html.rail-wide .rail-item.rail-rec .pill::after { display: none; }
+  html.rail-wide .rail-item .rail-long { flex: 1; }
+  html.rail-wide .rail-badge { display: block; font-size: 0.8125rem; font-weight: 700; color: var(--text-3); white-space: nowrap; }
+}

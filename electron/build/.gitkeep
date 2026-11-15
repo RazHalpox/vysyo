@@ -1,0 +1,2 @@
+# electron-builder buildResources : icones generees par `npm run icons` (scripts/make-icons.mjs)
+# depuis icon.svg, et entitlements macOS. Tout est commite.

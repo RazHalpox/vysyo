@@ -1,0 +1,34 @@
+package com.ultratv.tv.nativeapp.nav
+
+object Routes {
+    const val HOME = "home"
+    const val LIVE = "live"
+    const val MOVIES = "movies"
+    const val MOVIE_DETAIL = "movies/{id}"
+    const val SERIES = "series"
+    const val SERIES_DETAIL = "series/{id}"
+    const val SEARCH = "search"
+    const val GUIDE = "guide"
+    const val FAVORITES = "favorites"
+    /** Rubrique Sport (facultative, Réglages › Affichage) : direct, à venir et chaînes de sport tirés du guide de la source. */
+    const val SPORT = "sport"
+    const val SETTINGS = "settings"
+    /** Réglages complets ouverts depuis le mode simple (sinon « settings » y affiche les réglages simples). */
+    const val SETTINGS_ALL = "settings/all"
+    const val DOWNLOADS = "downloads"
+    const val RECORDINGS = "recordings"
+    /** Mode simple : liste de chaînes à gros caractères (favoris d'abord), ouverte par la tuile « Télé en direct ». */
+    const val SIMPLE_CHANNELS = "simple-channels"
+    // Player accepts a stream URL (URL-encoded) + title.
+    const val PLAYER = "player?url={url}&title={title}"
+
+    fun movieDetail(id: Long) = "movies/$id"
+    fun seriesDetail(id: Long) = "series/$id"
+    const val PERSON = "person/{name}"
+    fun person(name: String) = "person/" + java.net.URLEncoder.encode(name, "UTF-8").replace("+", "%20")
+    fun player(url: String, title: String): String {
+        val u = java.net.URLEncoder.encode(url, "UTF-8")
+        val t = java.net.URLEncoder.encode(title, "UTF-8")
+        return "player?url=$u&title=$t"
+    }
+}

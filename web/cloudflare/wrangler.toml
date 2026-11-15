@@ -1,0 +1,15 @@
+name = "ultratv-proxy"
+main = "worker.js"
+compatibility_date = "2025-09-01"
+
+# Proxy de la version web historique. REFUSE TOUT tant que ALLOWED_HOSTS n'est pas défini.
+#
+#   ALLOWED_HOSTS    noms d'hôte IPTV autorisés, séparés par des virgules (obligatoire)
+#   ALLOWED_ORIGINS  origines web autorisées à l'appeler depuis un navigateur
+#                    (ex. https://ultra-tv.example.com). Absent = pas de CORS.
+#
+# [vars]
+# ALLOWED_HOSTS = "iptv.example.com,cdn.example.com"
+# ALLOWED_ORIGINS = "https://ultra-tv.example.com"
+#
+# Les IP privées / loopback / metadata sont refusées même si elles figurent dans la liste.

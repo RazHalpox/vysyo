@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Logo Vysyo : « V » géométrique et point lumineux (dessin original), version monochrome. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:pathData="M34,38 L54,74 L74,38"
+        android:strokeColor="#000000" android:strokeWidth="12"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:fillColor="#00000000"/>
+    <path android:fillColor="#000000"
+        android:pathData="M80,28m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0"/>
+</vector>

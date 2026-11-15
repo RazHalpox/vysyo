@@ -1,0 +1,301 @@
+import { useLiveQuery } from "dexie-react-hooks";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { db } from "@/db/db";
+import { histKey, toggleFavorite } from "@/db/queries";
+import type { HistoryRow, MovieRow, SeriesRow, Source } from "@/db/types";
+import { useFavorites } from "@/hooks/data";
+import { useT } from "@/i18n";
+import { fmtClock, fmtDuration, firstString, toNum } from "@/lib/text";
+import { cleanEpisodeTitle, presentable } from "@/lib/titleCleaner";
+import { currentTransport } from "@/net/transport";
+import { seriesInfo, vodInfo, type SeriesInfo, type VodInfo } from "@/net/xtream";
+import { usePlayer } from "@/player/store";
+import { movieTarget } from "@/player/targets";
+import { stalkerClientFor } from "@/player/resolve";
+import { SERIES_PREFIX, parseStalkerLink, type StalkerEpisode } from "@/net/stalker";
+import { usePrefs } from "@/state/prefs";
+import { useActiveSource } from "@/state/sources";
+import { useUi } from "@/state/ui";
+import { Icon } from "@/ui/Icon";
+import { Img } from "@/ui/Img";
+import { StateCard } from "@/ui/common";
+import { credsOf } from "@/sync/core";
+import { useIsWatchedMovie, useWatchedEpisodes } from "@/trakt/hooks";
+import { TraktMovieActions, TraktSeriesActions } from "@/trakt/TraktUi";
+import { nextEpisode } from "@/trakt/progress";
+import { tmdbOf } from "@/player/trakt";
+import { NoSource } from "./states";
+import { ratingLabels, useRatings } from "@/hooks/ratings";
+import { useTrailerKey } from "@/hooks/trailer";
+import { TrailerPlayer } from "@/player/TrailerPlayer";
+import { useFanart, useTmdbSeason, useTvShow } from "@/hooks/extmeta";
+import { mergeEpisodes } from "@/lib/episodeTitles";
+import { airState, fmtEpisodeLine, type TvShow } from "@/lib/extmeta";
+import { localeOf } from "@/i18n/lang";
+import { TitleLogo } from "@/ui/TitleLogo";
+
+const WEEK = 7 * 86400_000;
+
+/** Fiche détaillée en cache (get_vod_info / get_series_info) : lue du disque, rafraîchie si vieille de plus de 7 jours. */
+function useInfo<T>(source: Source, kind: "vod" | "series", id: number): { info: T | null; error: boolean } {
+  const [state, setState] = useState<{ info: T | null; error: boolean }>({ info: null, error: false });
+  useEffect(() => {
+    let dead = false;
+    const key = `${kind}:${source.id}:${id}`;
+    setState({ info: null, error: false });
+    (async () => {
+      const hit = await db.details.get(key);
+      if (hit && !dead) setState({ info: hit.json as T, error: false });
+      if (hit && Date.now() - hit.fetchedAt < WEEK) return;
+      if (source.type === "stalker") {
+        // Portail Stalker : pas de fiche détaillée ; épisodes lus sur le portail (saisons, ou tableau `series`).
+        if (kind === "vod") { if (!dead && !hit) setState({ info: {} as T, error: false }); return; }
+        try {
+          const row = await db.series.where("[sourceId+seriesId]").equals([source.cid, id]).first();
+          const base = row?.url ? parseStalkerLink(row.url) : null;
+          // Série du module `type=series` : identifiant du portail préfixé « s: » (l'identifiant local peut être un condensé).
+          const portalId = base?.type === "series" ? SERIES_PREFIX + (row?.portalId ?? String(id)) : String(id);
+          const eps = await (await stalkerClientFor(source)).episodes(portalId, base?.cmd ?? null, row?.eps ?? null);
+          const json = stalkerSeriesInfo(eps);
+          await db.details.put({ key, json, fetchedAt: Date.now() });
+          if (!dead) setState({ info: json as T, error: false });
+        } catch { if (!dead && !hit) setState({ info: null, error: true }); }
+        return;
+      }
+      if (source.type !== "xtream") return;
+      try {
+        const tr = await currentTransport();
+        const json = kind === "vod" ? await vodInfo(tr, credsOf(source), id) : await seriesInfo(tr, credsOf(source), id);
+        await db.details.put({ key, json, fetchedAt: Date.now() });
+        if (!dead) setState({ info: json as T, error: false });
+      } catch { if (!dead && !hit) setState({ info: null, error: true }); }
+    })();
+    return () => { dead = true; };
+  }, [source.id, kind, id]);
+  return state;
+}
+
+/** Épisodes du portail Stalker présentés comme une fiche Xtream (`episodes` par saison) + leurs adresses internes. */
+export function stalkerSeriesInfo(eps: StalkerEpisode[]): SeriesInfo & { stalker: Array<{ id: number; url: string }> } {
+  const episodes: Record<string, Array<{ id: number; title: string; episode_num: number; container_extension: string; info: { plot?: string; movie_image?: string } }>> = {};
+  for (const e of eps) (episodes[String(e.season)] ??= []).push({ id: e.id, title: e.title, episode_num: e.num, container_extension: "", info: { plot: e.plot ?? undefined, movie_image: e.img ?? undefined } });
+  return { episodes, stalker: eps.map((e) => ({ id: e.id, url: e.url })) };
+}
+
+function Facts({ items }: { items: (string | number | null | undefined)[] }) {
+  const f = items.filter((x) => x != null && x !== "" && x !== 0);
+  return <div className="facts">{f.map((x, i) => <span key={i} style={{ display: "contents" }}>{i > 0 && <span aria-hidden="true">·</span>}<span>{x}</span></span>)}</div>;
+}
+
+function Cast({ names, label }: { names: string[]; label: string }) {
+  const nav = useNavigate();
+  if (!names.length) return null;
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+      <h2 style={{ fontSize: "1.125rem" }}>{label}</h2>
+      {/* Un nom ouvre la page de la personne : ses films et séries dans la playlist. */}
+      <div className="cast">{names.slice(0, 8).map((n, i) => <button key={i} type="button" className="c" onClick={() => nav(`/person/${encodeURIComponent(n.trim())}`)}><i>{n.trim().slice(0, 1).toUpperCase()}</i><span>{n.trim()}</span></button>)}</div>
+    </section>
+  );
+}
+const splitNames = (s: string | undefined | null) => (presentable(s) ?? "").split(/[,;/]/).map((x) => x.trim()).filter(Boolean);
+
+export function MovieDetail() {
+  const source = useActiveSource();
+  if (!source) return <NoSource />;
+  return <MovieInner source={source} />;
+}
+
+function MovieInner({ source }: { source: Source }) {
+  const t = useT();
+  const nav = useNavigate();
+  const { id } = useParams();
+  const sid = toNum(id);
+  const prefs = usePrefs();
+  const movie = useLiveQuery(() => db.movies.where("[sourceId+streamId]").equals([source.cid, sid]).first(), [source.cid, sid]);
+  const { info, error } = useInfo<VodInfo>(source, "vod", sid);
+  const favs = useFavorites(source, "movie");
+  const hist = useLiveQuery(() => db.history.get(histKey(prefs.profileId, source.id!, "movie", sid)), [sid, prefs.profileId]);
+  const seenMovie = useIsWatchedMovie();
+  const ext = useRatings("movie", tmdbOf((info?.info as { tmdb_id?: unknown } | undefined)?.tmdb_id), movie?.title, movie?.year);
+  const trailerKey = useTrailerKey("movie", info?.info?.youtube_trailer, tmdbOf((info?.info as { tmdb_id?: unknown } | undefined)?.tmdb_id), movie?.title, movie?.year);
+  const [trailerOpen, setTrailerOpen] = useState(false);
+  const movieTmdb = tmdbOf((info?.info as { tmdb_id?: unknown } | undefined)?.tmdb_id);
+  const art = useFanart(movie ? { kind: "movie", tmdb: movieTmdb, title: movie.title, year: movie.year } : null);
+  if (movie === undefined) return <div className="detail" />;
+  if (!movie) return <StateCard icon="alert" title={t("vod.empty")} actions={<button className="btn" onClick={() => nav(-1)}>{t("common.back")}</button>} />;
+  const i = info?.info;
+  const plot = presentable(i?.plot ?? i?.description);
+  const isFav = favs.some((f) => f.refId === sid);
+  const dur = i?.duration_secs ? fmtDuration(toNum(i.duration_secs)) : presentable(i?.duration);
+  const resume = hist && hist.pos > 20 ? hist.pos : 0;
+  const m: MovieRow = movie;
+  const play = (startAt?: number) => usePlayer.getState().open(movieTarget(source, { streamId: m.streamId, title: m.title, poster: m.poster, ext: m.ext, url: m.url }, startAt), "full");
+  // Fond : celui de la fiche, sinon le fond Fanart, sinon l'image du fournisseur.
+  const back = firstString(i?.backdrop_path) ?? art.background ?? i?.movie_image ?? m.poster;
+  return (
+    <div className="detail">
+      <div className="backdrop" aria-hidden="true"><Img src={back} /></div>
+      <div className="body">
+        <button className="back" onClick={() => nav(-1)}><Icon name="back" size={20} stroke={2.5} />{t("nav.movies")}</button>
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+          <h1 className={art.logo ? "has-logo" : undefined}><TitleLogo logo={art.logo} title={m.title}>{seenMovie(m.title, m.year) && <span className="seen-badge" title={t("trakt.watched")}><Icon name="check" size={16} stroke={3} />{t("trakt.watched")}</span>}</TitleLogo></h1>
+          <Facts items={[m.year ?? presentable(i?.releasedate ?? i?.release_date)?.slice(0, 4), dur, presentable(i?.genre), ...ratingLabels(ext, m.rating), m.ext.toUpperCase()]} />
+          <p className="plot clamp-4">{plot ?? (info || error ? t("vod.noPlot") : t("vod.loadingInfo"))}</p>
+          {error && <div className="muted">{t("vod.infoError")}</div>}
+        </div>
+        <div className="actions">
+          <button className="btn primary lg" onClick={() => play()}><Icon name="play" size={20} fill />{t("common.play")}</button>
+          {resume > 0 && <button className="btn lg" onClick={() => play(resume)}>{t("common.resumeAt", { t: fmtClock(resume) })}</button>}
+          {trailerKey && <button className="btn lg" onClick={() => setTrailerOpen(true)}><Icon name="play" size={20} />{t("trailer.button")}</button>}
+          <button className="btn icon lg" aria-label={t(isFav ? "common.removeFav" : "common.addFav")} aria-pressed={isFav} onClick={async () => {
+            const on = await toggleFavorite({ profile: prefs.profileId, sourceId: source.id!, kind: "movie", refId: sid, name: m.title, image: m.poster });
+            useUi.getState().toast(t(on ? "toast.favAdded" : "toast.favRemoved"));
+          }}><Icon name="heart" size={24} fill={isFav} /></button>
+        </div>
+        <TraktMovieActions title={m.title} year={m.year} tmdb={tmdbOf((i as { tmdb_id?: unknown } | undefined)?.tmdb_id)} seen={seenMovie(m.title, m.year)} />
+        <Cast names={[...splitNames(i?.director).map((n) => n), ...splitNames(i?.cast ?? i?.actors)]} label={t("vod.cast")} />
+      </div>
+      {trailerOpen && trailerKey && <TrailerPlayer ytKey={trailerKey} title={`${m.title} · ${t("trailer.button")}`} onClose={() => setTrailerOpen(false)} />}
+    </div>
+  );
+}
+
+export interface Ep { id: number; title: string; num: number; season: number; ext: string; secs: number; plot: string | null; img: string | null }
+
+export function parseEpisodes(info: SeriesInfo | null): { seasons: { n: number; name: string; eps: Ep[] }[] } {
+  if (!info?.episodes) return { seasons: [] };
+  type Raw = Array<{ id: string | number; title?: string; episode_num?: number | string; container_extension?: string; info?: { duration_secs?: number; plot?: string; movie_image?: string } }>;
+  const raw = info.episodes as unknown;
+  const bySeason: Record<string, Raw> = Array.isArray(raw) ? Object.fromEntries((raw as Raw[]).map((v, i) => [String(i + 1), v])) : (raw as Record<string, Raw>);
+  const seasons = Object.entries(bySeason).map(([k, eps]) => {
+    const n = toNum(k);
+    const meta = info.seasons?.find((s) => toNum(s.season_number) === n);
+    return {
+      n, name: meta?.name ?? "",
+      eps: (eps ?? []).map((e): Ep => ({
+        id: toNum(e.id), title: cleanEpisodeTitle(e.title ?? ""), num: toNum(e.episode_num), season: n, ext: e.container_extension || "mp4",
+        secs: toNum(e.info?.duration_secs), plot: presentable(e.info?.plot), img: e.info?.movie_image ?? null,
+      })).sort((a, b) => a.num - b.num),
+    };
+  }).filter((s) => s.eps.length).sort((a, b) => a.n - b.n);
+  return { seasons };
+}
+
+/** Calendrier TVmaze sous le titre : prochain épisode, dernier épisode diffusé, ou série terminée. */
+function AirLine({ show }: { show: TvShow | null }) {
+  const t = useT();
+  const lang = usePrefs((p) => p.lang);
+  const st = airState(show, Date.now());
+  if (!st) return null;
+  const code = (s: number, e: number) => t("ext.epCode", { s, e });
+  const line = st.ep ? fmtEpisodeLine(st.ep, Date.now(), localeOf(lang), code) : "";
+  const text = st.kind === "next" ? t("ext.nextEp", { ep: line }) : st.kind === "last" ? t("ext.lastEp", { ep: line }) : t("ext.ended");
+  return <div className={`air-line ${st.kind}`}><Icon name={st.kind === "ended" ? "check" : "guide"} size={16} />{text}</div>;
+}
+
+export function SeriesDetail() {
+  const source = useActiveSource();
+  if (!source) return <NoSource />;
+  return <SeriesInner source={source} />;
+}
+
+function SeriesInner({ source }: { source: Source }) {
+  const t = useT();
+  const nav = useNavigate();
+  const { id } = useParams();
+  const sid = toNum(id);
+  const prefs = usePrefs();
+  const row = useLiveQuery(() => db.series.where("[sourceId+seriesId]").equals([source.cid, sid]).first(), [source.cid, sid]);
+  const { info, error } = useInfo<SeriesInfo>(source, "series", sid);
+  const favs = useFavorites(source, "series");
+  const hist = useLiveQuery(() => db.history.where("[profile+sourceId]").equals([prefs.profileId, source.id!]).filter((h) => h.seriesId === sid).toArray(), [sid, prefs.profileId]) ?? [];
+  const parsed = useMemo(() => parseEpisodes(info), [info]);
+  const seenEps = useWatchedEpisodes(row?.title, row?.year);
+  const ext = useRatings("tv", tmdbOf((info?.info as { tmdb?: unknown } | undefined)?.tmdb), row?.title, row?.year);
+  const trailerKey = useTrailerKey("tv", info?.info?.youtube_trailer, tmdbOf((info?.info as { tmdb?: unknown } | undefined)?.tmdb), row?.title, row?.year);
+  const [trailerOpen, setTrailerOpen] = useState(false);
+  const seriesRef = useMemo(() => (row ? { kind: "tv" as const, tmdb: tmdbOf((info?.info as { tmdb?: unknown } | undefined)?.tmdb), title: row.title, year: row.year } : null), [row, info]);
+  const art = useFanart(seriesRef);
+  const tvShow = useTvShow(seriesRef);
+  const [season, setSeason] = useState<number | null>(null);
+  const histBy = useMemo(() => new Map(hist.map((h) => [h.epId ?? -1, h] as [number, HistoryRow])), [hist]);
+  const last = useMemo(() => [...hist].sort((a, b) => b.updatedAt - a.updatedAt)[0], [hist]);
+  useEffect(() => { if (season == null && parsed.seasons.length) setSeason(last?.season ?? parsed.seasons[0]!.n); }, [parsed, last, season]);
+  // Titres / résumés / vignettes TMDB de la saison affichée (titres génériques de la source seulement).
+  const tmdbEps = useTmdbSeason(seriesRef, season);
+  const curEps = useMemo(() => mergeEpisodes(parsed.seasons.find((x) => x.n === season)?.eps ?? [], tmdbEps, row?.title), [parsed, season, tmdbEps, row?.title]);
+  if (row === undefined) return <div className="detail" />;
+  if (!row) return <StateCard icon="alert" title={t("vod.empty")} actions={<button className="btn" onClick={() => nav(-1)}>{t("common.back")}</button>} />;
+  const s: SeriesRow = row;
+  const i = info?.info;
+  const cur = parsed.seasons.find((x) => x.n === season);
+  const curById = new Map(curEps.map((e) => [e.id, e]));
+  const withTmdb = (e: Ep) => curById.get(e.id) ?? e;
+  const isFav = favs.some((f) => f.refId === sid);
+  const plot = presentable(i?.plot) ?? presentable(s.plot);
+  const playEp = (e: Ep, startAt?: number) => usePlayer.getState().open({
+    kind: "episode", sourceId: source.id!, cid: source.cid, refId: e.id, title: `${s.title}`, subtitle: `${t("common.season", { n: e.season })} · ${t("common.episodeShort", { n: e.num })} ${e.title}`.trim(),
+    image: s.poster, ext: e.ext, seriesId: sid, season: e.season, episode: e.num, startAt,
+  }, "full");
+  const allEps = parsed.seasons.flatMap((x) => x.eps);
+  const resumeEp = last?.epId != null ? allEps.find((e) => e.id === last.epId) : undefined;
+  // Sans historique local : l'épisode qui suit le dernier vu sur Trakt (s'il existe dans la playlist).
+  const traktNext = !last && seenEps ? nextEpisode(seenEps, allEps.map((e) => ({ season: e.season, episode: e.num }))) : null;
+  const mainRaw = resumeEp ?? (traktNext ? allEps.find((e) => e.season === traktNext.season && e.num === traktNext.episode) : undefined) ?? allEps[0];
+  const main = mainRaw && withTmdb(mainRaw);
+  return (
+    <div className="detail series">
+      <div className="backdrop" aria-hidden="true"><Img src={firstString(i?.backdrop_path) ?? s.backdrop ?? art.background} /></div>
+      <div className="serie-layout" style={{ position: "relative" }}>
+        <section style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+          <button className="back" style={{ position: "static" }} onClick={() => nav(-1)}><Icon name="back" size={20} stroke={2.5} />{t("nav.series")}</button>
+          <div className="poster-big"><Img src={i?.cover || s.poster} /></div>
+          <h1 className={art.logo ? "has-logo" : undefined} style={{ fontSize: "2.25rem" }}><TitleLogo logo={art.logo} title={s.title} /></h1>
+          <AirLine show={tvShow} />
+          <Facts items={[s.year, parsed.seasons.length ? t("common.seasons", { count: parsed.seasons.length }) : null, presentable(i?.genre), ...ratingLabels(ext, s.rating)]} />
+          <p className="plot clamp-4" style={{ fontSize: "0.9375rem" }}>{plot ?? (info || error ? t("vod.noPlot") : t("vod.loadingInfo"))}</p>
+          {error && <div className="muted">{t("vod.infoError")}</div>}
+          <div className="actions">
+            {main && (
+              <button className="btn primary lg" onClick={() => playEp(main, resumeEp && last && last.pos > 20 ? last.pos : undefined)}>
+                <Icon name="play" size={20} fill />
+                {resumeEp && last ? t("vod.resumeEp", { s: resumeEp.season, e: resumeEp.num }) : t("vod.startEp", { s: main.season, e: main.num })}
+              </button>
+            )}
+            {trailerKey && <button className="btn lg" onClick={() => setTrailerOpen(true)}><Icon name="play" size={20} />{t("trailer.button")}</button>}
+            <button className="btn icon lg" aria-label={t(isFav ? "common.removeFav" : "common.addFav")} aria-pressed={isFav} onClick={async () => {
+              const on = await toggleFavorite({ profile: prefs.profileId, sourceId: source.id!, kind: "series", refId: sid, name: s.title, image: s.poster });
+              useUi.getState().toast(t(on ? "toast.favAdded" : "toast.favRemoved"));
+            }}><Icon name="heart" size={24} fill={isFav} /></button>
+          </div>
+          <TraktSeriesActions title={s.title} year={s.year} tmdb={tmdbOf((i as { tmdb?: unknown } | undefined)?.tmdb)} season={season} episodes={allEps.map((e) => ({ season: e.season, episode: e.num }))} />
+          <Cast names={splitNames(i?.cast)} label={t("vod.cast")} />
+        </section>
+        <section aria-label={t("vod.episodes")} style={{ display: "flex", flexDirection: "column", gap: "1rem", minWidth: 0 }}>
+          <div className="chips" role="tablist" aria-label={t("common.season", { n: "" })}>
+            {parsed.seasons.map((x) => <button key={x.n} className="chip" role="tab" aria-selected={season === x.n} onClick={() => setSeason(x.n)}>{t("common.season", { n: x.n })}</button>)}
+          </div>
+          {!info && !error && <div className="skeleton" style={{ height: 120 }} />}
+          {info && !cur && <div className="muted">{t("vod.noEpisodes")}</div>}
+          {cur && curEps.map((e) => {
+            const h = histBy.get(e.id);
+            const ratio = h && h.dur ? h.pos / h.dur : 0;
+            return (
+              <button key={e.id} className="episode" onClick={() => playEp(e, h && h.pos > 20 ? h.pos : undefined)}>
+                <span className="th"><Img src={e.img ?? s.poster} />{ratio > 0 && <span className="progress"><i style={{ width: `${ratio * 100}%` }} /></span>}</span>
+                <span className="grow">
+                  <b className="ellipsis" style={{ display: "block" }}>{seenEps?.has(`${e.season}x${e.num}`) && <Icon name="check" size={14} stroke={3} className="seen-ep" />}{t("common.episodeShort", { n: e.num })} · {e.title}</b>
+                  <span className="m">{[e.secs ? fmtDuration(e.secs) : null, seenEps?.has(`${e.season}x${e.num}`) ? t("trakt.watched") : null, h ? (ratio > 0.95 ? t("common.watched") : t("common.minLeft", { t: fmtDuration(h.dur - h.pos) })) : null].filter(Boolean).join(" · ")}</span>
+                  {e.plot && <span className="p clamp-2" style={{ display: "block" }}>{e.plot}</span>}
+                </span>
+              </button>
+            );
+          })}
+        </section>
+      </div>
+      {trailerOpen && trailerKey && <TrailerPlayer ytKey={trailerKey} title={`${s.title} · ${t("trailer.button")}`} onClose={() => setTrailerOpen(false)} />}
+    </div>
+  );
+}
