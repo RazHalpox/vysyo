@@ -67,7 +67,6 @@ fun SupportQrDialog(D: DesignStrings, onClose: () -> Unit) {
         ) {
             Text(D.supportTitle, color = Ux.Text, fontFamily = Sora, fontWeight = FontWeight.Bold, fontSize = 36.spx, maxLines = 2, textAlign = TextAlign.Center)
             Text(D.supportScan, color = Ux.Text3, fontFamily = Manrope, fontSize = 22.spx, maxLines = 3, textAlign = TextAlign.Center)
-            Image(painterResource(R.drawable.kofi_qr), contentDescription = SUPPORT_URL, modifier = Modifier.size(300.design).clip(RoundedCornerShape(16.design)))
             Text(SUPPORT_URL.removePrefix("https://"), color = Ux.Text, fontFamily = Manrope, fontWeight = FontWeight.Bold, fontSize = 24.spx, maxLines = 1, textAlign = TextAlign.Center)
             val req = remember { FocusRequester() }
             var f by remember { mutableStateOf(false) }
