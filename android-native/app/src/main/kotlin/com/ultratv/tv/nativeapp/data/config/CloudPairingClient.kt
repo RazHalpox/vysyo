@@ -31,7 +31,7 @@ object WorkerUrl {
     }
 
     /** Ancienne adresse par défaut (workers.dev) : enregistrée dans les préférences, elle équivaut à « défaut ». */
-    const val LEGACY_DEFAULT = "https://ultratv-config.khalilbenaz.workers.dev"
+    const val LEGACY_DEFAULT = "https://legacy.vysyo.invalid"  // Vysyo : aucun serveur du projet d'origine
 
     /**
      * Adresse effective du Worker (fonction pure) : vide ou égale à l'ancien défaut -> [default] (nouveau domaine) ;

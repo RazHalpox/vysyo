@@ -10,10 +10,10 @@ import java.io.IOException
  * bloquant *.workers.dev. Décision pure ici, interceptor OkHttp plus bas.
  */
 object WorkerFallbackLogic {
-    const val PRIMARY_HOST = "tv.weedy.dpdns.org"
-    const val LEGACY_HOST = "ultratv-config.khalilbenaz.workers.dev"
+    const val PRIMARY_HOST = "api.vysyo.invalid"  // Vysyo : aucun serveur
+    const val LEGACY_HOST = "legacy.vysyo.invalid"
     /** Site (tableau de bord, appairage par QR) : distinct de l'adresse de l'API, qui reste [PRIMARY_HOST]. */
-    const val SITE_HOST = "ultratv.dpdns.org"
+    const val SITE_HOST = "site.vysyo.invalid"
 
     /** Adresse du site à AFFICHER (et à mettre dans le QR) pour une adresse d'API : nos deux hôtes → le site ; un Worker
      *  auto-hébergé garde la sienne. */
