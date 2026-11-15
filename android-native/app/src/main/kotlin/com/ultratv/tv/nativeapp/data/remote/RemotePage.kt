@@ -55,7 +55,7 @@ main{padding:10px 16px}
 </head>
 <body>
 <header>
-<div class="brand">ULTRA TV</div>
+<div class="brand">VYSYO</div>
 <input id="q" type="search" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false">
 <div class="tabs" role="tablist">
 <button class="tab" role="tab" data-t="movie" aria-selected="true"></button>
