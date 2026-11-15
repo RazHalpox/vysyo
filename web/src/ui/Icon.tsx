@@ -55,14 +55,13 @@ export function Icon({ name, size = 22, stroke = 2, fill = false, className }: {
   );
 }
 
-/** Icône de l'application (maître : ultratv-icon.svg). */
+/** Logo de Vysyo (dessin original) : « V » blanc et point lumineux sur un carré violet. */
 export function AppMark({ size = 44, className = "logo" }: { size?: number; className?: string }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 512 512" aria-hidden="true" className={className}>
-      <rect width="512" height="512" rx="116" fill="#0A0A0C" />
-      <rect x="96" y="120" width="320" height="216" rx="40" fill="none" stroke="#F5F5F7" strokeWidth="28" />
-      <path d="M224 188v80l70-40z" fill="#D91E2B" />
-      <path d="M196 392h120" stroke="#F5F5F7" strokeWidth="28" strokeLinecap="round" />
+    <svg width={size} height={size} viewBox="0 0 108 108" aria-hidden="true" className={className}>
+      <rect width="108" height="108" rx="24" fill="#5B33D6" />
+      <path d="M34 38 L54 74 L74 38" fill="none" stroke="#FFFFFF" strokeWidth="12" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="80" cy="28" r="5" fill="#C4B5FD" />
     </svg>
   );
 }

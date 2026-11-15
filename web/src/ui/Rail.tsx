@@ -105,7 +105,7 @@ export function Rail() {
     <nav className="rail" aria-label={t("app.name")}>
       <div className="rail-head">
         <AppMark />
-        <span className="rail-brand" aria-hidden="true">ULTRA <span>TV</span></span>
+        <span className="rail-brand" aria-hidden="true">VYSYO</span>
         <button type="button" className="rail-toggle" onClick={() => set({ railCollapsed: !railCollapsed })}
           aria-label={t(railCollapsed ? "rail.expand" : "rail.collapse")} title={t(railCollapsed ? "rail.expand" : "rail.collapse")}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

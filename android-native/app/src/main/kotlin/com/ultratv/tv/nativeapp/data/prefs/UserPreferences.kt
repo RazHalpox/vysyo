@@ -141,7 +141,7 @@ data class UserPrefs(
     val syncUnmeteredOnly: Boolean = true,
     // ── Personnalisation (Réglages › Affichage) ──
     /** Couleur d'accent : "red" (défaut) | "blue" | "violet" | "green" | "orange" | "pink" (voir AccentChoice). */
-    val accent: String = "red",
+    val accent: String = "violet",  // Vysyo
     /** Taille du texte : "normal" | "large" | "xlarge" (voir TextSize). */
     val textSize: String = "normal",
     /** Taille de l'affichage du mode simple (petite / normale / grande) : propre à l'appareil (dépend de l'écran). */
@@ -293,7 +293,7 @@ class UserPreferencesStore @Inject constructor(
             syncMode = p[Keys.syncMode] ?: "auto", syncHour = p[Keys.syncHour] ?: 3, syncLive = p[Keys.syncLive] ?: true, syncEpg = p[Keys.syncEpg] ?: true,
             syncVod = p[Keys.syncVod] ?: true, syncSeries = p[Keys.syncSeries] ?: true, syncUnmeteredOnly = p[Keys.syncUnmetered] ?: true,
             languages = p[Keys.languages] ?: "", includeMulti = p[Keys.includeMulti] ?: true, preferredQuality = p[Keys.preferredQuality] ?: "auto", includeUnknownLang = p[Keys.includeUnknown] ?: true,
-            accent = p[Keys.accent] ?: "red", textSize = p[Keys.textSize] ?: "normal", simpleSize = p[Keys.simpleSize] ?: "normal", animations = p[Keys.animations] ?: "auto",
+            accent = p[Keys.accent] ?: "violet", textSize = p[Keys.textSize] ?: "normal", simpleSize = p[Keys.simpleSize] ?: "normal", animations = p[Keys.animations] ?: "auto",
             homeOrder = p[Keys.homeOrder] ?: "", homeHidden = p[Keys.homeHidden] ?: "", startScreen = p[Keys.startScreen] ?: "", lastScreen = p[Keys.lastScreen] ?: "",
             sportSection = p[Keys.sportSection] ?: false,
             catalogSource = p[Keys.catalogSource] ?: "provider", catalogLayout = p[Keys.catalogLayout] ?: "split",

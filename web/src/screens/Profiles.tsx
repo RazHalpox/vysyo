@@ -13,7 +13,7 @@ export function Profiles() {
   const [name, setName] = useState("");
   return (
     <div className="stage">
-      <header><div className="brand"><AppMark size={40} className="ic" /><span>ULTRA <span>TV</span></span></div><span /></header>
+      <header><div className="brand"><AppMark size={40} className="ic" /><span>VYSYO</span></div><span /></header>
       <main style={{ alignItems: "center", textAlign: "center" }}>
         <h1>{t("profile.who")}</h1>
         <div className="profiles">

@@ -35,7 +35,7 @@ export function errorKey(e: unknown, t: TFn, type?: Source["type"]): string {
 
 function Brand() {
   const t = useT();
-  return <div className="brand"><AppMark size={40} className="ic" /><span>ULTRA <span>TV</span></span><span className="sr-only">{t("app.name")}</span></div>;
+  return <div className="brand"><AppMark size={40} className="ic" /><span>VYSYO</span><span className="sr-only">{t("app.name")}</span></div>;
 }
 
 function Steps({ n }: { n: number }) {

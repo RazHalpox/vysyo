@@ -30,7 +30,7 @@ export const ACCENT_DEFS: readonly { id: AccentId; hex: string }[] = [
   { id: "indigo", hex: "#5B5BE0" },
   { id: "fuchsia", hex: "#C026D3" },
 ];
-export const DEFAULT_ACCENT: AccentId = "red";
+export const DEFAULT_ACCENT: AccentId = "violet";  // Vysyo
 
 // Anciens réglages du bureau : l'accent était une couleur hexadécimale.
 const LEGACY_HEX: Record<string, AccentId> = {

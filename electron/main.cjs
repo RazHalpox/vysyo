@@ -229,7 +229,7 @@ function buildErrorPage(title, detail, retryHref) {
   p{opacity:.7;margin:0 0 20px;font-size:14px;word-break:break-word}
   code{display:block;background:#17171B;border:1px solid #2A2A30;padding:12px;border-radius:8px;font-size:12px;
        text-align:left;white-space:pre-wrap;margin:0 0 20px;opacity:.85}
-  a.btn{display:inline-block;background:#D91E2B;color:#fff;border-radius:8px;padding:10px 22px;
+  a.btn{display:inline-block;background:#7C4DFF;color:#fff;border-radius:8px;padding:10px 22px;
         font-size:14px;text-decoration:none}
   a.btn:hover{background:#E8323F}
 </style></head>
