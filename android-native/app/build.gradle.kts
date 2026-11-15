@@ -138,8 +138,9 @@ android {
             // apksigner can't re-sign an APK that already has v3 signatures
             // from the new key with an added lineage — it needs the old
             // (debug) key as the starting point.
-            signingConfig = signingConfigs.getByName("debug")
-            applicationIdSuffix = ".debug"
+            // Vysyo : signature directe avec la clé fixe (variables ULTRA_KEYSTORE…), sinon clé de debug.
+            signingConfig = if (!System.getenv("ULTRA_KEYSTORE").isNullOrBlank()) signingConfigs.getByName("release")
+                else signingConfigs.getByName("debug")
         }
     }
 
